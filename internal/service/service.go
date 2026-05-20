@@ -879,6 +879,7 @@ func mergeUsers(base, delta []model.UserSpec) []model.UserSpec {
 	for _, u := range m {
 		out = append(out, u)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 

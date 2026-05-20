@@ -85,6 +85,10 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Lowercase repository owner
+        id: meta
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -98,9 +102,9 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ghcr.io/cedar2025/xboard-node:latest
-            ghcr.io/cedar2025/xboard-node:${{ github.sha }}
-            ${{ startsWith(github.ref, 'refs/tags/') && format('ghcr.io/cedar2025/xboard-node:{0}', github.ref_name) || '' }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/xboard-node:latest
+            ghcr.io/${{ steps.meta.outputs.owner }}/xboard-node:${{ github.sha }}
+            ${{ startsWith(github.ref, 'refs/tags/') && format('ghcr.io/{0}/xboard-node:{1}', steps.meta.outputs.owner, github.ref_name) || '' }}
 
   release:
     name: Release

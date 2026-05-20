@@ -791,14 +791,14 @@ func (c *trackedPacketConn) UnwrapPacketReader() (N.PacketReader, []N.CountFunc)
 	if c.us == nil {
 		return c.PacketConn, nil
 	}
-	return c.PacketConn, []N.CountFunc{c.makeCountFunc(&c.us.download)}
+	return c.PacketConn, []N.CountFunc{c.makeCountFunc(&c.us.upload)}
 }
 
 func (c *trackedPacketConn) UnwrapPacketWriter() (N.PacketWriter, []N.CountFunc) {
 	if c.us == nil {
 		return c.PacketConn, nil
 	}
-	return c.PacketConn, []N.CountFunc{c.makeCountFunc(&c.us.upload)}
+	return c.PacketConn, []N.CountFunc{c.makeCountFunc(&c.us.download)}
 }
 
 func (c *trackedPacketConn) Upstream() any           { return c.PacketConn }
