@@ -3,8 +3,8 @@
 ## Quick start
 
 ```bash
-git clone -b compose --depth 1 https://github.com/cedar2025/xboard-node.git
-cd xboard-node
+git clone -b compose --depth 1 https://github.com/oballm/Xboard-Node.git
+cd Xboard-Node
 # Edit config/config.yml: panel.url, panel.token, panel.node_id
 docker compose up -d
 ```
@@ -33,4 +33,4 @@ docker compose down
 
 ## Image
 
-Default: `ghcr.io/cedar2025/xboard-node:latest`.
+Default: `ghcr.io/oballm/xboard-node:latest`.
