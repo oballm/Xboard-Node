@@ -61,6 +61,11 @@ type SingBox struct {
 	// trackerRegistered prevents duplicate AppendTracker calls on the same
 	// Router instance during Reload. Reset to false on full restart.
 	trackerRegistered bool
+
+	// prevOutbounds is the parsed outbound list from the last successful
+	// Start/Reload, used by outboundReconcile to diff against the incoming
+	// config so we know what to add, replace or remove via OutboundManager.
+	prevOutbounds []option.Outbound
 }
 
 func New(cfg config.KernelConfig) *SingBox {
@@ -138,6 +143,7 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	s.users = users
 	s.nodeConfig = nodeConfig
 	s.tls = tls
+	s.prevOutbounds = opts.Outbounds
 
 	// Fresh tracker on full restart.
 	s.connTracker = NewConnTracker(0)
@@ -189,9 +195,13 @@ func recycleOldBox(oldBox *box.Box, oldCancel context.CancelFunc, oldCtx context
 	nlog.Core().Debug("sing-box: old instance recycled")
 }
 
-// Reload hot-swaps the inbound users and routing rules without restarting the box.
-// Routes, outbounds, and the connTracker stay alive so in-flight connections
-// continue to be tracked correctly.
+// Reload hot-swaps the inbound users, outbounds and routing rules without
+// restarting the box. The connTracker stays alive so in-flight byte/IP
+// accounting continues across the reload.
+//
+// Outbounds are reconciled against the OutboundManager before UpdateRules so
+// new rules can resolve newly-installed outbound tags; deletions happen after
+// UpdateRules so no live rule still references them.
 func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -221,14 +231,27 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 		return fmt.Errorf("router not available")
 	}
 
-	// Update routing rules
-	if err := router.UpdateRules(opts.Route.Rules, opts.Route.RuleSet); err != nil {
-		nlog.Core().Debug("routing reload failed", "error", err)
-	} else {
-		nlog.Core().Debug("sing-box routing reloaded")
+	om := service.FromContext[adapter.OutboundManager](s.ctx)
+	if om == nil {
+		return fmt.Errorf("outbound manager not available")
 	}
 
 	nopFactory := singLog.NewNOPFactory()
+
+	// Reconcile outbounds → UpdateRules → remove deleted outbounds, all in one
+	// helper so the order is enforced. UpdateRules runs in the closure between
+	// the create and remove phases.
+	updateRules := func() error {
+		if err := router.UpdateRules(opts.Route.Rules, opts.Route.RuleSet); err != nil {
+			nlog.Core().Debug("routing reload failed", "error", err)
+			return nil // match prior behaviour: don't abort reload on rule errors
+		}
+		nlog.Core().Debug("sing-box routing reloaded")
+		return nil
+	}
+	if err := outboundReconcile(s.ctx, om, router, nopFactory, s.prevOutbounds, opts.Outbounds, updateRules); err != nil {
+		return fmt.Errorf("reconcile outbounds: %w", err)
+	}
 
 	// Configuration hash check for inbound reconstruction
 	tlsChanged := !bytes.Equal(s.tls.CertPEM, tls.CertPEM) || !bytes.Equal(s.tls.KeyPEM, tls.KeyPEM)
@@ -311,6 +334,7 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 	s.users = users
 	s.nodeConfig = nodeConfig
 	s.tls = tls
+	s.prevOutbounds = opts.Outbounds
 	return nil
 }
 
