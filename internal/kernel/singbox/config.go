@@ -73,7 +73,7 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 		}
 	}
 
-	mergeCustomSingbox(cfg, kcfg)
+	mergeCustomSingbox(cfg, kcfg, nc.CustomConfig)
 	return cfg
 }
 
@@ -351,11 +351,23 @@ func copyStrings(src []string) []string {
 	return out
 }
 
-func mergeCustomSingbox(cfg M, kcfg config.KernelConfig) {
-	custom, err := kernel.LoadCustomConfig(kcfg.CustomConfig)
-	if err != nil {
-		nlog.Core().Error("failed to load custom sing-box config", "error", err)
-		return
+// mergeCustomSingbox folds free-form sing-box extras into cfg. Priority order:
+//  1. Panel-delivered CustomConfig (wire) — when non-empty, used as the sole
+//     source so panel becomes the single point of management.
+//  2. Local file at kcfg.CustomConfig — used only when wire is empty, providing
+//     backwards compatibility for nodes not yet on the panel-pushed channel.
+func mergeCustomSingbox(cfg M, kcfg config.KernelConfig, wireCustom map[string]any) {
+	var custom map[string]any
+	if len(wireCustom) > 0 {
+		custom = wireCustom
+		nlog.Core().Debug("merging custom sing-box config from panel wire")
+	} else {
+		var err error
+		custom, err = kernel.LoadCustomConfig(kcfg.CustomConfig)
+		if err != nil {
+			nlog.Core().Error("failed to load custom sing-box config", "error", err)
+			return
+		}
 	}
 	if custom == nil {
 		return

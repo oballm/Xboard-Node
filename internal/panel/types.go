@@ -100,6 +100,12 @@ type NodeConfig struct {
 	CustomRoutes     []map[string]any  `json:"custom_routes,omitempty"`
 	CustomRouteRules []CustomRouteRule `json:"custom_route_rules,omitempty"`
 
+	// CustomConfig is a free-form sing-box config delta delivered via panel wire.
+	// When non-empty, it takes priority over local extras.json file — letting panel
+	// centrally manage rule_set definitions / experimental / DNS / endpoints / etc.
+	// instead of relying on per-node scp deployment.
+	CustomConfig map[string]any `json:"custom_config,omitempty"`
+
 	// Certificate settings (Xboard extension)
 	CertConfig *CertConfig `json:"cert_config,omitempty"`
 	AutoTLS    bool        `json:"auto_tls,omitempty"` // Deprecated: use CertConfig

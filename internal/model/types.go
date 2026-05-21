@@ -15,6 +15,7 @@ type NodeSpec struct {
 	CustomOutbounds  []OutboundConfig
 	CustomRoutes     []map[string]any
 	CustomRouteRules []CustomRouteRule
+	CustomConfig     map[string]any
 	CertConfig       *config.CertConfig
 	AutoTLS          bool
 	Domain           string
@@ -110,6 +111,36 @@ func cloneAnyMap(src map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// cloneAnyMapDeep recursively copies maps and slices so callers can mutate the
+// returned tree without affecting the source. Used for free-form wire fields
+// like CustomConfig where downstream code (mergeCustomSingbox) appends into
+// nested arrays.
+func cloneAnyMapDeep(src map[string]any) map[string]any {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(src))
+	for k, v := range src {
+		out[k] = cloneAnyDeep(v)
+	}
+	return out
+}
+
+func cloneAnyDeep(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		return cloneAnyMapDeep(x)
+	case []any:
+		s := make([]any, len(x))
+		for i, item := range x {
+			s[i] = cloneAnyDeep(item)
+		}
+		return s
+	default:
+		return v
+	}
 }
 
 func cloneMapSlice(src []map[string]any) []map[string]any {
