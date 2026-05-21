@@ -594,8 +594,8 @@ github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646/go.mod h1:jpp1/29i3P1S
 github.com/niemeyer/pretty v0.0.0-20200227124842-a10e7caefd8e/go.mod h1:zD1mROLANZcx1PVRCS0qkT7pwLkGfwJo4zjcN/Tysno=
 github.com/oballm/Xray-core v0.0.0-20260409213332-f47935539965 h1:aAJFh7wZqINaL/KDLju4UHsqzoA0xzsYCIjSeBUpIWQ=
 github.com/oballm/Xray-core v0.0.0-20260409213332-f47935539965/go.mod h1:OXMlhBloFry8mw0KwWLWLd3RQyXJzEYsCGlgsX36h60=
-github.com/oballm/sing-box v1.14.0-alpha.2.0.20260520133849-bff4637c4d2c h1:0LEAwRhqaR5wrAIw2Mhywkxz2nYZ4q2YVaqEa7d1WgU=
-github.com/oballm/sing-box v1.14.0-alpha.2.0.20260520133849-bff4637c4d2c/go.mod h1:DTyWqWrjh/DqOHynCUgMhW8fgrkctleficRKwQmh668=
+github.com/oballm/sing-box v1.14.0-alpha.2.0.20260520165207-841659cf4d24 h1:vPQDLqJ20nWh2ZmFsAjUlXmDGXjuvqcR5JeR+nJgEpU=
+github.com/oballm/sing-box v1.14.0-alpha.2.0.20260520165207-841659cf4d24/go.mod h1:DTyWqWrjh/DqOHynCUgMhW8fgrkctleficRKwQmh668=
 github.com/oklog/ulid v1.3.1/go.mod h1:CirwcVhetQ6Lv90oh/F+FBtV6XMibvdAFo93nm5qn4U=
 github.com/openai/openai-go/v3 v3.26.0 h1:bRt6H/ozMNt/dDkN4gobnLqaEGrRGBzmbVs0xxJEnQE=
 github.com/openai/openai-go/v3 v3.26.0/go.mod h1:cdufnVK14cWcT9qA1rRtrXx4FTRsgbDPW7Ia7SS5cZo=
