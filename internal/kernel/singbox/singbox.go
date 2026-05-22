@@ -66,6 +66,14 @@ type SingBox struct {
 	// Start/Reload, used by outboundReconcile to diff against the incoming
 	// config so we know what to add, replace or remove via OutboundManager.
 	prevOutbounds []option.Outbound
+
+	// prevDNSOptions is the parsed DNS options from the last successful
+	// Start/Reload, used by dnsOptionsChanged to detect any DNS config diff.
+	// On diff we deliberately fail Reload so service.go falls back to a full
+	// startKernel — sing-box dialers cache DNS transport pointers at creation
+	// time, so hot-swap leaves dangling references (see dns_reconcile.go for
+	// the long version of why).
+	prevDNSOptions *option.DNSOptions
 }
 
 func New(cfg config.KernelConfig) *SingBox {
@@ -144,6 +152,7 @@ func (s *SingBox) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls 
 	s.nodeConfig = nodeConfig
 	s.tls = tls
 	s.prevOutbounds = opts.Outbounds
+	s.prevDNSOptions = opts.DNS
 
 	// Fresh tracker on full restart.
 	s.connTracker = NewConnTracker(0)
@@ -249,9 +258,31 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 		nlog.Core().Debug("sing-box routing reloaded")
 		return nil
 	}
+	// DNS change check — must happen BEFORE any state-mutating reconcile so
+	// the fallback startKernel rebuilds everything cleanly from scratch.
+	// Returning an error here surfaces to service.go applyChanges as a Reload
+	// failure, which triggers startKernel (full sing-box restart). This is
+	// the only safe way to apply DNS changes given sing-box dialers cache
+	// transport pointers at creation time — see dns_reconcile.go.
+	//
+	// Critical: we MUST stop the current sing-box instance synchronously
+	// before returning the error. Otherwise the subsequent Start (called by
+	// service.go's fallback) tries to box.New a fresh instance while the old
+	// one still holds cache_file's file lock, which makes the new instance's
+	// "initialize cache-file" wait 9.5s for bbolt timeout and then fail —
+	// leaving the kernel dead. s.stop() closes the inbound, drains
+	// connections (best-effort, drainTimeout=5s), and releases all file
+	// locks; Start then runs against a fully clean slate.
+	if dnsOptionsChanged(s.ctx, s.prevDNSOptions, opts.DNS) {
+		nlog.Core().Info("DNS config changed, stopping current sing-box for full restart")
+		s.stop()
+		return fmt.Errorf("DNS config changed, requires full restart")
+	}
+
 	if err := outboundReconcile(s.ctx, om, router, nopFactory, s.prevOutbounds, opts.Outbounds, updateRules); err != nil {
 		return fmt.Errorf("reconcile outbounds: %w", err)
 	}
+	s.prevOutbounds = opts.Outbounds
 
 	// Configuration hash check for inbound reconstruction
 	tlsChanged := !bytes.Equal(s.tls.CertPEM, tls.CertPEM) || !bytes.Equal(s.tls.KeyPEM, tls.KeyPEM)
