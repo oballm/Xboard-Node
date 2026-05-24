@@ -202,6 +202,12 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 	if nc.ListenIP != "" {
 		listenAddr = nc.ListenIP
 	}
+	// sniffing.enabled on so domain-based routing rules can match against the
+	// real SNI / Host. Unlike sing-box, xray requires explicit destOverride —
+	// http/tls/quic covers the common HTTPS + QUIC + plain-HTTP traffic. We
+	// don't enable fakedns (that's a client-side fake-IP DNS feature, not a
+	// VPN inbound concern). routeOnly defaults to false so destination is also
+	// rewritten — matches sing-box's sniff_override_destination:true.
 	base := M{
 		"tag":      nc.Protocol + "-in",
 		"listen":   listenAddr,
@@ -211,6 +217,10 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 			"sockopt": M{
 				"reusePort": true,
 			},
+		},
+		"sniffing": M{
+			"enabled":      true,
+			"destOverride": []string{"http", "tls", "quic"},
 		},
 	}
 

@@ -628,8 +628,12 @@ func hexEncode(dst, src []byte) {
 }
 
 // ensureGeoData downloads geo databases when routes reference geoip/geosite.
+// Scans both nc.Routes (legacy simple routes) and nc.CustomRouteRules (panel-
+// resolved route_rule_group_refs land here) — both can carry geoip:/geosite:
+// prefixes. Matches singbox/config.go which already checks both.
 func (x *Xray) ensureGeoData(nc *model.NodeSpec) {
-	needIP, needSite := kernel.NeedsGeoIP(nc.Routes), kernel.NeedsGeoSite(nc.Routes)
+	needIP := kernel.NeedsGeoIP(nc.Routes) || kernel.NeedsGeoIPRules(nc.CustomRouteRules)
+	needSite := kernel.NeedsGeoSite(nc.Routes) || kernel.NeedsGeoSiteRules(nc.CustomRouteRules)
 	if !needIP && !needSite {
 		return
 	}

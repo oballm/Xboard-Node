@@ -442,6 +442,11 @@ func mergeCustomSingboxRoute(cfg M, customRoute map[string]any) {
 }
 
 func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert) M {
+	// sing-box 1.14 deprecated the inbound-level `sniff` / `sniff_override_destination`
+	// fields (struct still parses them but no consumer reads them). Default
+	// content sniffing in 1.14 is configured via a route rule action: panel-proxy
+	// injects {"action":"sniff"} at the head of custom_routes. See resolveSniffAction
+	// in panel-proxy main.go.
 	base := M{
 		"tag":         nc.Protocol + "-in",
 		"listen":      "::",
