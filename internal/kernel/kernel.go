@@ -138,7 +138,12 @@ func UserDiff(oldUsers, newUsers []model.UserSpec) (toAdd, toRemove []model.User
 		}
 	}
 	for _, u := range oldUsers {
-		if _, exists := newMap[u.ID]; !exists {
+		// Remove a user when its ID disappears OR when the same ID's UUID
+		// changed — in the latter case the old UUID must be purged before the
+		// new one is added (kernels key inbound users by ID, so re-adding the
+		// same ID without removing first collides and leaves the old UUID live).
+		newUser, exists := newMap[u.ID]
+		if !exists || newUser.UUID != u.UUID {
 			toRemove = append(toRemove, u)
 		}
 	}
