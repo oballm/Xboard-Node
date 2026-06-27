@@ -570,7 +570,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if s.nodeLog != nil {
 			s.nodeLog.Info(fmt.Sprintf("users updated, %d users", len(event.Users)))
 		}
-		s.applyUserUpdate(ctx, event.Users, newHash)
+		s.applyUserUpdate(ctx, event.Users, newHash, "ws")
 
 	case controlplane.EventSyncUserDelta:
 		if len(event.DeltaUsers) == 0 {
@@ -672,18 +672,26 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 		}
 	}
 
-	if result.users != nil {
-		usersChanged := result.userHash != s.lastUserHash
-
-		if usersChanged && !configChanged {
-			s.applyUserUpdate(ctx, result.users, result.userHash)
-		} else if usersChanged {
+	// pendingDiag holds an opened sync for the config+users-simultaneous path:
+	// the user diff is applied via the kernel reload below (not applyUserUpdate),
+	// so its "sync complete" is emitted after applyChanges returns.
+	var pendingDiag *syncDiagnostics
+	if result.users != nil && result.userHash != s.lastUserHash {
+		if !configChanged {
+			s.applyUserUpdate(ctx, result.users, result.userHash, "rest")
+		} else {
+			d := s.beginUserSync("rest", result.users)
 			s.updateUserState(result.users)
+			pendingDiag = &d
 		}
 	}
 
+	reloadStatus := "skipped"
 	if configChanged {
-		s.applyChanges(ctx, true, false)
+		reloadStatus = s.applyChanges(ctx, true, false)
+	}
+	if pendingDiag != nil {
+		s.finishUserSync(*pendingDiag, 0, "skipped_config_reload", reloadStatus)
 	}
 }
 
@@ -765,28 +773,133 @@ func (s *Service) ensureRunning() bool {
 
 // ─── User update entry points ───────────────────────────────────────────────
 
-// applyUserUpdate replaces the full user set and hot-swaps the kernel.
-// Called from WS sync.users and REST polling.
-func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, newHash string) {
+// logUserSync emits one summary line per user-set change: counts and status
+// only, never per-user data or UUIDs (UUIDs are proxy credentials and must not
+// reach logs). Callers gate this on an actual change (the hash already differs),
+// so steady-state polls stay silent regardless of the panel's 304 behaviour.
+//
+// inboundStatus reports the in-place user hot-swap result (success / failed /
+// skipped_not_running); reloadStatus reports any kernel restart fallback
+// (skipped / restart_success / restart_failed). It answers "did the panel give a
+// sane snapshot, and did the kernel actually apply it" without leaking secrets.
+func (s *Service) syncLogger() *nlog.NodeLog {
+	if s.nodeLog != nil {
+		return s.nodeLog
+	}
+	return nlog.Core()
+}
+
+// logSyncStart records a user sync entering the kernel-apply stage, before any
+// inbound mutation. Pairing it with logSyncComplete lets operators detect a sync
+// that began but never finished (process killed mid-apply): a "sync start" with
+// no matching "sync complete".
+func (s *Service) logSyncStart(source string, previous, fetched, added, removed int) {
+	s.syncLogger().Info("sync start",
+		"source", source,
+		"previous_users", previous,
+		"fetched_users", fetched,
+		"added", added,
+		"removed", removed,
+	)
+}
+
+// logSyncComplete records the outcome of a user sync: counts and status only,
+// never per-user data or UUIDs (UUIDs are proxy credentials and must not reach
+// logs). inboundStatus is the in-place hot-swap result; reloadStatus is any
+// kernel restart fallback.
+func (s *Service) logSyncComplete(source string, previous, fetched, added, removed, skipped int, inboundStatus, reloadStatus string) {
+	s.syncLogger().Info("sync complete",
+		"source", source,
+		"previous_users", previous,
+		"fetched_users", fetched,
+		"added", added,
+		"removed", removed,
+		"skipped", skipped,
+		"inbound_user_update", inboundStatus,
+		"reload_kernel", reloadStatus,
+		"kernel", s.kernel.Name(),
+	)
+}
+
+// syncDiagnostics carries the "sync start" counts so the matching "sync
+// complete" reports identical previous/fetched/added/removed.
+type syncDiagnostics struct {
+	source   string
+	previous int
+	fetched  int
+	added    int
+	removed  int
+}
+
+// beginUserSync snapshots the user diff and emits "sync start". It deliberately
+// does NOT reject empty/abnormal snapshots (project decision: surface a real
+// problem loudly rather than mask it). Callers invoke it only on an actual
+// change, so steady-state polls stay silent.
+func (s *Service) beginUserSync(source string, users []model.UserSpec) syncDiagnostics {
+	s.metricsMu.RLock()
+	prev := append([]model.UserSpec(nil), s.lastUsers...)
+	s.metricsMu.RUnlock()
+	toAdd, toRemove := kernel.UserDiff(prev, users)
+	d := syncDiagnostics{source: source, previous: len(prev), fetched: len(users), added: len(toAdd), removed: len(toRemove)}
+	s.logSyncStart(d.source, d.previous, d.fetched, d.added, d.removed)
+	return d
+}
+
+// finishUserSync emits the "sync complete" line that closes a beginUserSync.
+// skipped is a best-effort count of intended adds the kernel could not apply
+// (see applyUserUpdateWithDiag); the kernel's per-user Warn lines are the
+// authoritative record.
+func (s *Service) finishUserSync(d syncDiagnostics, skipped int, inboundStatus, reloadStatus string) {
+	s.logSyncComplete(d.source, d.previous, d.fetched, d.added, d.removed, skipped, inboundStatus, reloadStatus)
+}
+
+// applyUserUpdate replaces the full user set and hot-swaps the kernel. Called
+// from WS sync.users and REST polling, only when the user set changed. source
+// identifies the trigger ("ws" or "rest") for the diagnostic lines.
+func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, newHash, source string) {
+	s.applyUserUpdateWithDiag(ctx, users, newHash, s.beginUserSync(source, users))
+}
+
+// applyUserUpdateWithDiag applies a user-only change against a sync already
+// opened by beginUserSync, emitting the matching "sync complete".
+func (s *Service) applyUserUpdateWithDiag(ctx context.Context, users []model.UserSpec, newHash string, d syncDiagnostics) {
 	if !s.ensureRunning() {
+		s.finishUserSync(d, 0, "skipped_not_running", "skipped")
 		return
 	}
 
 	prevUsers, prevHash := s.prepareUserState(users)
-	added, removed, err := s.kernel.UpdateUsers(users)
+
+	actualAdded, _, err := s.kernel.UpdateUsers(users)
 	if err != nil {
 		nlog.Core().Warn(fmt.Sprintf("UpdateUsers failed, restarting kernel: %v", err))
-		if !s.startKernel(s.lastConfig, users) {
+		if s.startKernel(s.lastConfig, users) {
+			s.finishUserSync(d, 0, "failed", "restart_success")
+		} else {
 			s.restoreUserState(prevUsers, prevHash)
+			s.finishUserSync(d, 0, "failed", "restart_failed")
 		}
 		return
 	}
 	if newHash != "" {
 		s.lastUserHash = newHash
 	}
-	if s.nodeLog != nil && (added > 0 || removed > 0) {
-		s.nodeLog.Info(fmt.Sprintf("users updated: +%d -%d", added, removed))
+	// Best-effort per-user skip count: the gap between intended adds (UserDiff vs
+	// s.lastUsers) and what the kernel reported applying. Exact when the service
+	// and kernel user sets agree — including the FIRST sync a bad user appears in.
+	// If they diverge (e.g. a bad user persists across syncs), this can mis-count
+	// (usually under-report; the clamp below only prevents a negative value). It
+	// feeds nothing but this log line — the kernel's own per-user Warn lines are
+	// the authoritative record of every skip.
+	skipped := d.added - actualAdded
+	if skipped < 0 {
+		skipped = 0
 	}
+	inboundStatus := "success"
+	if skipped > 0 {
+		inboundStatus = "partial"
+	}
+	s.finishUserSync(d, skipped, inboundStatus, "skipped")
 }
 
 // applyUserDelta applies an incremental user change (add or remove) directly
@@ -906,17 +1019,21 @@ func subtractUsers(base, delta []model.UserSpec) []model.UserSpec {
 
 // applyChanges applies config changes to the kernel. User-only changes are
 // handled by applyUserUpdate/applyUserDelta directly via the atomic user API.
-func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged bool) {
+// applyChanges returns a status string (used as reload_kernel in the sync
+// diagnostic): skipped / stopped_no_users / skipped_no_config / success /
+// restart_success / start_success / failed.
+func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged bool) string {
 	if !configChanged {
-		return
+		return "skipped"
 	}
 
 	if s.lastConfig == nil || len(s.lastUsers) == 0 {
 		if len(s.lastUsers) == 0 {
 			s.kernel.Stop()
 			s.appliedState.Users = nil
+			return "stopped_no_users"
 		}
-		return
+		return "skipped_no_config"
 	}
 
 	// If config changed, delegate to kernel.Reload. The kernel implementation
@@ -924,17 +1041,24 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	if configChanged && s.kernel.IsRunning() {
 		if err := s.kernel.Reload(s.lastConfig, s.lastUsers, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn(fmt.Sprintf("reload failed, restarting: %v", err))
-			s.startKernel(s.lastConfig, s.lastUsers)
-		} else {
-			s.appliedState.Config = s.lastConfig
-			s.appliedState.Users = s.lastUsers
-			if s.nodeLog != nil {
-				s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(s.lastUsers)))
+			if s.startKernel(s.lastConfig, s.lastUsers) {
+				return "restart_success"
 			}
+			return "failed"
 		}
+		s.appliedState.Config = s.lastConfig
+		s.appliedState.Users = s.lastUsers
+		if s.nodeLog != nil {
+			s.nodeLog.Info(fmt.Sprintf("config updated, %d users", len(s.lastUsers)))
+		}
+		return "success"
 	} else if !s.kernel.IsRunning() {
-		s.startKernel(s.lastConfig, s.lastUsers)
+		if s.startKernel(s.lastConfig, s.lastUsers) {
+			return "start_success"
+		}
+		return "failed"
 	}
+	return "skipped"
 }
 
 func (s *Service) trackAndEnforce(ctx context.Context) {

@@ -126,7 +126,7 @@ func TestApplyUserUpdatePreparesLimiterBeforeKernelUpdate(t *testing.T) {
 		}
 	}
 
-	s.applyUserUpdate(context.Background(), newUsers, computeUserHash(newUsers))
+	s.applyUserUpdate(context.Background(), newUsers, computeUserHash(newUsers), "test")
 
 	if got := k.updateCalls; got != 1 {
 		t.Fatalf("UpdateUsers call count = %d, want 1", got)
@@ -152,7 +152,7 @@ func TestApplyUserUpdateRestoresStateWhenKernelAndRestartFail(t *testing.T) {
 	oldHash := s.lastUserHash
 
 	newUsers := []model.UserSpec{{ID: 2, UUID: "uuid-new", SpeedLimit: 8}}
-	s.applyUserUpdate(context.Background(), newUsers, computeUserHash(newUsers))
+	s.applyUserUpdate(context.Background(), newUsers, computeUserHash(newUsers), "test")
 
 	if got := k.startCalls; got != 1 {
 		t.Fatalf("Start call count = %d, want 1", got)
