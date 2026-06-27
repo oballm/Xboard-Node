@@ -292,39 +292,41 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 		return 0, fmt.Errorf("not running")
 	}
 
-	// Merge: overwrite existing users' properties, collect truly new ones.
+	// Merge properties of existing users immediately; collect truly new users
+	// in toAdd. New users are only recorded in userMap once they have actually
+	// been applied to xray, so bookkeeping never claims a user the inbound lacks.
 	userMap := make(map[int]model.UserSpec, len(x.users))
 	for _, u := range x.users {
 		userMap[u.ID] = u
 	}
 	var toAdd []model.UserSpec
 	for _, u := range users {
-		if _, exists := userMap[u.ID]; !exists {
+		if _, exists := userMap[u.ID]; exists {
+			userMap[u.ID] = u // property update for an existing kernel user
+		} else {
 			toAdd = append(toAdd, u)
 		}
-		userMap[u.ID] = u // always overwrite properties
-	}
-	merged := make([]model.UserSpec, 0, len(userMap))
-	for _, u := range userMap {
-		merged = append(merged, u)
 	}
 
 	if len(toAdd) == 0 {
 		// No new kernel users, but properties (limits) may have changed.
+		merged := usersFromMap(userMap)
 		x.users = merged
 		x.mu.Unlock()
 		x.updateDispatcherLimits(merged)
-	x.updateBandwidthLimits(merged)
+		x.updateBandwidthLimits(merged)
 		return 0, nil
 	}
 
 	um, err := x.getUserManager()
 	if err != nil {
-		// Protocol doesn't support UserManager → full restart
+		// Protocol doesn't support UserManager → full restart with the complete
+		// target set (existing users with updated props + the new users).
 		nc, t := x.nodeConfig, x.tls
+		targetUsers := append(usersFromMap(userMap), toAdd...)
 		x.mu.Unlock()
 		nlog.Core().Debug("xray: AddUsers fallback to restart", "reason", err)
-		if err := x.Start(nc, merged, t); err != nil {
+		if err := x.Start(nc, targetUsers, t); err != nil {
 			return 0, err
 		}
 		return len(toAdd), nil
@@ -336,27 +338,37 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 
 	ctx := context.Background()
 	added := 0
+	skipped := 0
 	for _, u := range toAdd {
 		mu, err := toMemoryUser(proto, nc, u)
 		if err != nil {
 			nlog.Core().Warn("xray: skip user, cannot build account", "user", u.ID, "error", err)
+			skipped++
 			continue
 		}
 		if err := um.AddUser(ctx, mu); err != nil {
 			nlog.Core().Warn("xray: AddUser failed", "user", u.ID, "error", err)
+			skipped++
 			continue
 		}
+		userMap[u.ID] = u // record only after the inbound actually accepted it
 		added++
 	}
 
-	// Update bookkeeping with full merged list (new users + updated properties).
+	// Bookkeeping reflects exactly what the inbound holds: existing users plus
+	// the new users that were successfully added (skipped users are excluded).
+	merged := usersFromMap(userMap)
 	x.mu.Lock()
 	x.users = merged
 	x.mu.Unlock()
 	x.updateDispatcherLimits(merged)
 	x.updateBandwidthLimits(merged)
 
-	nlog.Core().Info("xray: users added via UserManager", "added", added, "total", len(merged))
+	if skipped > 0 {
+		nlog.Core().Warn("xray: some users could not be added", "added", added, "skipped", skipped, "total", len(merged))
+	} else {
+		nlog.Core().Info("xray: users added via UserManager", "added", added, "total", len(merged))
+	}
 	return added, nil
 }
 
@@ -461,35 +473,71 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 
 	proto := x.protocol
 	nc := x.nodeConfig
+	oldUsers := x.users
 	x.mu.Unlock()
 
 	ctx := context.Background()
 
-	// Remove first, then add (order matters for UUID changes on same ID)
+	// applied accumulates the user set that the inbound actually holds, so a
+	// failed add never leaves bookkeeping claiming a user the inbound lacks.
+	// Seed it with the kept users (old minus removed, then overlay property
+	// updates from the new list for IDs that are not being re-added).
+	removeSet := make(map[int]struct{}, len(toRemove))
+	for _, u := range toRemove {
+		removeSet[u.ID] = struct{}{}
+	}
+	addSet := make(map[int]struct{}, len(toAdd))
+	for _, u := range toAdd {
+		addSet[u.ID] = struct{}{}
+	}
+	applied := make(map[int]model.UserSpec, len(users))
+	for _, u := range oldUsers {
+		if _, removed := removeSet[u.ID]; !removed {
+			applied[u.ID] = u
+		}
+	}
+	for _, u := range users {
+		if _, adding := addSet[u.ID]; !adding {
+			applied[u.ID] = u // property-only update for an existing kernel user
+		}
+	}
+
+	// Remove first, then add (order matters for UUID changes on same ID).
 	for _, u := range toRemove {
 		email := userEmail(u.ID)
 		if err := um.RemoveUser(ctx, email); err != nil {
 			nlog.Core().Debug("xray: RemoveUser skipped in UpdateUsers", "user", u.ID, "error", err)
 		}
 	}
+	skipped := 0
 	for _, u := range toAdd {
 		mu, err := toMemoryUser(proto, nc, u)
 		if err != nil {
 			nlog.Core().Warn("xray: skip user in UpdateUsers", "user", u.ID, "error", err)
+			skipped++
 			continue
 		}
 		if err := um.AddUser(ctx, mu); err != nil {
 			nlog.Core().Warn("xray: AddUser failed in UpdateUsers", "user", u.ID, "error", err)
+			skipped++
+			continue
 		}
+		applied[u.ID] = u // record only after the inbound actually accepted it
 	}
+	added -= skipped
 
+	appliedUsers := usersFromMap(applied)
 	x.mu.Lock()
-	x.users = users
+	x.users = appliedUsers
 	x.mu.Unlock()
-	x.updateDispatcherLimits(users)
-	x.updateBandwidthLimits(users)
+	x.updateDispatcherLimits(appliedUsers)
+	x.updateBandwidthLimits(appliedUsers)
 
-	nlog.Core().Info("xray: users updated via UserManager", "added", added, "removed", removed, "total", len(users))
+	if skipped > 0 {
+		nlog.Core().Warn("xray: some users could not be updated", "added", added, "removed", removed, "skipped", skipped, "total", len(appliedUsers))
+	} else {
+		nlog.Core().Info("xray: users updated via UserManager", "added", added, "removed", removed, "total", len(appliedUsers))
+	}
 	return
 }
 
@@ -588,6 +636,16 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 	}
 
 	return mu, nil
+}
+
+// usersFromMap flattens an ID-keyed user map into a slice. Order is
+// unspecified; all consumers (stats, limiters, hashing) are order-independent.
+func usersFromMap(userMap map[int]model.UserSpec) []model.UserSpec {
+	users := make([]model.UserSpec, 0, len(userMap))
+	for _, u := range userMap {
+		users = append(users, u)
+	}
+	return users
 }
 
 // parseCipherType maps a cipher name string to the xray CipherType enum.
