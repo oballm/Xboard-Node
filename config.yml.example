@@ -1,26 +1,55 @@
 # Xboard Node Configuration
 # Top-level settings are inherited by all instances. Instance overrides take precedence.
+#
+# kernel.type selects the proxy core:
+#   auto     (default) — pick per node transport: xray for xhttp/splithttp,
+#                        sing-box otherwise. The node switches kernels at runtime
+#                        if the transport later crosses that boundary.
+#   singbox            — always sing-box (a node whose transport is xhttp/splithttp
+#                        is rejected, since sing-box cannot serve it).
+#   xray               — always xray (handles every transport).
+# kernel.type can only be set at the top level or per instance — NOT per node
+# (nodes[].kernel can override config_dir/log_level/etc., but not the kernel type).
+# Leave it unset to get "auto".
 
 # ── Single node (simplest) ──
 # panel:
 #   url: "https://panel.example.com"
 #   token: "your-api-key"
 #   node_id: 1
-
-# ── Multiple instances ──
 # kernel:
-#   type: "singbox"
+#   type: auto          # optional; "auto" is the default
+
+# ── Machine mode (one process manages all nodes the panel binds to it) ──
+# panel:
+#   url: "https://panel.example.com"
+# kernel:
+#   type: auto          # each discovered node picks its kernel from its transport
+# machine:
+#   machine_id: 1
+#   token: "your-machine-token"
+#   # token_env: "MACHINE_TOKEN"   # optional: read token from this env var
+
+# ── Multiple instances (top-level values are the default each instance inherits) ──
+# kernel:
+#   type: auto          # default for every instance below
 # log:
-#   level: "info"
+#   level: info
 # instances:
-#   - panel:
-#       url: "https://panel.example.com"
+#   - panel:                          # inherits kernel.type: auto
+#       url: "https://panel-a.com"
 #       token: "api-key-1"
 #       node_id: 1
 #   - panel:
-#       url: "https://panel.example.com"
-#     machine:
-#       machine_id: 2
-#       token: "machine-token-2"
+#       url: "https://panel-b.com"
+#       token: "api-key-2"
+#       node_id: 2
+#     kernel:
+#       type: xray                    # pin this instance to xray (overrides top level)
+#   - panel:
+#       url: "https://panel-c.com"
+#     machine:                        # an instance can itself be machine mode
+#       machine_id: 5
+#       token: "machine-token-c"
 #     log:
-#       level: "debug"   # override for this instance only
+#       level: debug                  # override for this instance only

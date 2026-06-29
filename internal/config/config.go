@@ -118,7 +118,7 @@ type WSConfig struct {
 }
 
 type KernelConfig struct {
-	Type      string `yaml:"type"` // "singbox" or "xray"
+	Type      string `yaml:"type"` // "auto" (default), "singbox" or "xray"
 	ConfigDir string `yaml:"config_dir"`
 	LogLevel  string `yaml:"log_level"`
 
@@ -555,7 +555,7 @@ func (c *Config) inheritFrom(parent *Config) {
 
 func (c *Config) setDefaultsFrom(baseDir string) {
 	if c.Kernel.Type == "" {
-		c.Kernel.Type = "singbox"
+		c.Kernel.Type = "auto"
 	}
 	if c.Kernel.ConfigDir == "" {
 		c.Kernel.ConfigDir = baseDir
@@ -720,9 +720,9 @@ func (c *Config) validate() error {
 		}
 	}
 	switch c.Kernel.Type {
-	case "singbox", "xray":
+	case "auto", "singbox", "xray":
 	default:
-		return fmt.Errorf("kernel.type must be 'singbox' or 'xray', got '%s'", c.Kernel.Type)
+		return fmt.Errorf("kernel.type must be 'auto', 'singbox' or 'xray', got '%s'", c.Kernel.Type)
 	}
 	if c.Cert.AutoTLS && c.Cert.Domain == "" {
 		return fmt.Errorf("cert.domain is required when cert.auto_tls is enabled")

@@ -65,8 +65,8 @@ panel:
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Kernel.Type != "singbox" {
-		t.Errorf("default kernel.type: got %q, want singbox", cfg.Kernel.Type)
+	if cfg.Kernel.Type != "auto" {
+		t.Errorf("default kernel.type: got %q, want auto", cfg.Kernel.Type)
 	}
 	// config_dir should default to the directory containing the config file.
 	expectedDir := filepath.Dir(path)

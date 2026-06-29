@@ -38,6 +38,17 @@ type Service struct {
 	speedTracker *limiter.SpeedTracker
 	cert         *cert.Manager
 
+	// kernelMode is the configured policy ("auto"/"singbox"/"xray"); kernelType
+	// is the concrete kernel currently built into s.kernel. In "auto" mode the
+	// transport decides the concrete kernel, and ensureKernelType hot-swaps
+	// s.kernel when a config change crosses the kernel boundary.
+	kernelMode string
+	kernelType string
+	// kernelRunning mirrors s.kernel.IsRunning() for the metrics callback, which
+	// runs on the WS goroutine and must not touch s.kernel directly (s.kernel is
+	// reassigned by ensureKernelType on the Run goroutine).
+	kernelRunning atomic.Bool
+
 	lastConfig *model.NodeSpec
 	lastUsers  []model.UserSpec
 
@@ -139,16 +150,15 @@ func NewWithControlPlane(cfg *config.Config, cp controlplane.ControlPlane) *Serv
 func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	certMgr := cert.NewManager(cfg.Cert)
 
-	var k kernel.Kernel
-	switch cfg.Kernel.Type {
-	case "singbox":
-		k = singbox.New(cfg.Kernel)
-	case "xray":
-		k = xray.New(cfg.Kernel)
-	default:
-		nlog.Core().Warn("unsupported kernel type, defaulting to sing-box", "type", cfg.Kernel.Type)
-		k = singbox.New(cfg.Kernel)
+	// kernelMode is the configured policy. The concrete initial kernel is
+	// sing-box for "auto" (the transport refines it once the first node config
+	// arrives, via ensureKernelType) and the explicit kernel otherwise.
+	kernelMode := cfg.Kernel.Type
+	initialType := kernelMode
+	if initialType == model.KernelAuto || initialType == "" {
+		initialType = model.KernelSingBox
 	}
+	k := newKernelByType(cfg.Kernel, initialType)
 
 	l := limiter.New()
 	st := limiter.NewSpeedTracker(l)
@@ -158,6 +168,8 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		source:       cp,
 		sink:         cp,
 		kernel:       k,
+		kernelMode:   kernelMode,
+		kernelType:   initialType,
 		tracker:      tracker.New(),
 		limiter:      l,
 		speedTracker: st,
@@ -166,6 +178,65 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		wsStatusCh:   make(chan controlplane.StatusChange, 4),
 		pullResults:  make(chan pullResult, 1),
 	}
+}
+
+// newKernelByType builds a concrete kernel of the given type.
+func newKernelByType(kcfg config.KernelConfig, kernelType string) kernel.Kernel {
+	switch kernelType {
+	case model.KernelXray:
+		return xray.New(kcfg)
+	case model.KernelSingBox:
+		return singbox.New(kcfg)
+	default:
+		nlog.Core().Warn("unsupported kernel type, defaulting to sing-box", "type", kernelType)
+		return singbox.New(kcfg)
+	}
+}
+
+// ensureKernelType hot-swaps s.kernel to the requested concrete type when it
+// differs from the currently built kernel. The freshly built kernel is left
+// stopped; the caller (startKernel / applyChanges) starts it. Must run on the
+// Run goroutine — s.kernel has no other writer, and its only off-loop reader
+// (wsMetrics) goes through s.kernelRunning instead.
+func (s *Service) ensureKernelType(want string) {
+	if want == "" || want == s.kernelType {
+		return
+	}
+	prev := s.kernelType
+	if s.kernel != nil {
+		s.kernel.Stop()
+		s.kernelRunning.Store(false)
+	}
+	s.kernel = newKernelByType(s.cfg.Kernel, want)
+	s.kernelType = want
+	// Re-attach the limiter hooks to the freshly built kernel.
+	s.kernel.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
+	s.kernel.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
+	nlog.Core().Info("kernel switched", "from", prev, "to", want)
+}
+
+// resolveKernelType picks the concrete kernel for the spec's transport WITHOUT
+// switching. It returns an error only for an explicit kernel that cannot serve
+// the transport (e.g. kernel.type=singbox on an xhttp node) — "auto" always
+// resolves to a capable kernel. Callers validate the config against the returned
+// type's protocols and only then call ensureKernelType, so a config rejected by
+// static validation never tears down the running kernel. (A runtime *start*
+// failure after a type switch is a separate case with no rollback — break-before-
+// make, same as upstream; it self-heals on the next config event.)
+func (s *Service) resolveKernelType(spec *model.NodeSpec) (string, error) {
+	want := model.ResolveEffectiveKernel(spec.Network, s.kernelMode)
+	if err := model.ValidateTransportKernel(spec.Network, want); err != nil {
+		return "", err
+	}
+	return want, nil
+}
+
+// protocolsForKernelType reports the protocols a concrete kernel supports
+// without disturbing the running kernel (kernel constructors are side-effect
+// free and Protocols() is static). Used to validate a config against the kernel
+// it WILL run on, before committing to a hot-swap.
+func protocolsForKernelType(kernelType string) []string {
+	return newKernelByType(config.KernelConfig{Type: kernelType}, kernelType).Protocols()
 }
 
 func (s *Service) Run(ctx context.Context) error {
@@ -179,7 +250,10 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := s.initialSetup(ctx); err != nil {
 		return fmt.Errorf("initial setup: %w", err)
 	}
-	defer s.kernel.Stop()
+	// Read s.kernel at call time, not now: ensureKernelType may reassign it via a
+	// runtime hot-swap, and the live kernel (not the one captured here) must be
+	// the one stopped on shutdown.
+	defer func() { s.kernel.Stop() }()
 
 	// Set up tickers
 	trackTicker := time.NewTicker(time.Duration(s.cfg.Node.TrackInterval) * time.Second)
@@ -288,9 +362,14 @@ func (s *Service) initialSetup(ctx context.Context) error {
 		}
 		return fmt.Errorf("initial config is nil")
 	}
-	if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), bootstrap.Config, s.cert.TLSCert()); err != nil {
+	want, err := s.resolveKernelType(bootstrap.Config)
+	if err != nil {
 		return err
 	}
+	if err := validateNodeRuntime(want, protocolsForKernelType(want), bootstrap.Config, s.cert.TLSCert()); err != nil {
+		return err
+	}
+	s.ensureKernelType(want)
 
 	s.metricsMu.Lock()
 	s.lastConfig = bootstrap.Config
@@ -433,7 +512,7 @@ func (s *Service) requestWSResync(ctx context.Context, reason string) {
 func (s *Service) wsMetrics() map[string]interface{} {
 	status := monitor.Collect()
 	m := s.buildMetrics(status)
-	m["kernel_status"] = s.kernel.IsRunning()
+	m["kernel_status"] = s.kernelRunning.Load()
 	return m
 }
 
@@ -543,10 +622,16 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 		if newConfigHash == s.lastConfigHash {
 			return
 		}
-		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), event.Config, s.cert.TLSCert()); err != nil {
+		want, err := s.resolveKernelType(event.Config)
+		if err != nil {
+			nlog.Core().Warn("ws config kernel resolution failed, ignoring update", "error", err)
+			return
+		}
+		if err := validateNodeRuntime(want, protocolsForKernelType(want), event.Config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("ws config validation failed, ignoring update", "error", err)
 			return
 		}
+		s.ensureKernelType(want)
 		// Initialize nodeLog on first config
 		if s.nodeLog == nil {
 			s.nodeLog = nlog.ForNode(event.Config.Protocol, event.Config.ServerPort)
@@ -652,10 +737,14 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 	}
 
 	if result.config != nil {
-		if err := validateNodeRuntime(s.cfg, s.kernel.Protocols(), result.config, s.cert.TLSCert()); err != nil {
+		if want, err := s.resolveKernelType(result.config); err != nil {
+			nlog.Core().Warn("runtime config kernel resolution failed", "error", err)
+			result.config = nil
+		} else if err := validateNodeRuntime(want, protocolsForKernelType(want), result.config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("runtime config validation failed", "error", err)
 			result.config = nil
 		} else {
+			s.ensureKernelType(want)
 			configChanged = true
 			// Initialize or update node logger
 			if s.nodeLog == nil {
@@ -743,6 +832,7 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 		nlog.Core().Error("failed to start kernel", "error", err)
 		return false
 	}
+	s.kernelRunning.Store(true)
 
 	s.appliedState.Config = nc
 	s.appliedState.Users = users
@@ -1030,6 +1120,7 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	if s.lastConfig == nil || len(s.lastUsers) == 0 {
 		if len(s.lastUsers) == 0 {
 			s.kernel.Stop()
+			s.kernelRunning.Store(false)
 			s.appliedState.Users = nil
 			return "stopped_no_users"
 		}
@@ -1046,6 +1137,7 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 			}
 			return "failed"
 		}
+		s.kernelRunning.Store(true)
 		s.appliedState.Config = s.lastConfig
 		s.appliedState.Users = s.lastUsers
 		if s.nodeLog != nil {
@@ -1105,7 +1197,7 @@ func (s *Service) pushReportAsync() {
 	online := s.tracker.CurrentOnline()
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
-	metrics["kernel_status"] = s.kernel.IsRunning()
+	metrics["kernel_status"] = s.kernelRunning.Load()
 
 	go func() {
 		defer s.pushActive.Store(false)
@@ -1135,7 +1227,7 @@ func (s *Service) pushReportSync() {
 	online := s.tracker.CurrentOnline()
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
-	metrics["kernel_status"] = s.kernel.IsRunning()
+	metrics["kernel_status"] = s.kernelRunning.Load()
 
 	if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 		nlog.Core().Warn("failed to push final report", "error", err)
@@ -1276,14 +1368,14 @@ func (s *Service) reportDevices() {
 
 // ─── Runtime validation ─────────────────────────────────────────────────
 
-func validateNodeRuntime(cfg *config.Config, kcfgSupported []string, spec *model.NodeSpec, tls kernel.TLSCert) error {
+func validateNodeRuntime(kernelType string, kcfgSupported []string, spec *model.NodeSpec, tls kernel.TLSCert) error {
 	if spec == nil {
 		return fmt.Errorf("node spec is nil")
 	}
 	if !containsString(kcfgSupported, spec.Protocol) {
-		return fmt.Errorf("protocol %q is not supported by kernel %q", spec.Protocol, cfg.Kernel.Type)
+		return fmt.Errorf("protocol %q is not supported by kernel %q", spec.Protocol, kernelType)
 	}
-	if err := validateTLSRequirements(spec, tls, cfgKernelType(cfg)); err != nil {
+	if err := validateTLSRequirements(spec, tls, kernelType); err != nil {
 		return err
 	}
 	if err := validateRuntimeCertConfig(spec); err != nil {
@@ -1369,13 +1461,6 @@ func validateRealityRequirements(spec *model.NodeSpec, _ string) error {
 		return fmt.Errorf("reality tls requires tls_settings.server_name or tls_settings.dest")
 	}
 	return nil
-}
-
-func cfgKernelType(cfg *config.Config) string {
-	if cfg == nil {
-		return ""
-	}
-	return strings.ToLower(strings.TrimSpace(cfg.Kernel.Type))
 }
 
 func containsString(items []string, target string) bool {
