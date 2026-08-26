@@ -20,6 +20,39 @@
 # kernel:
 #   type: auto          # optional; "auto" is the default
 
+# ── Multi-node (one process runs several node IDs on the same panel) ──
+# All entries share panel.url and panel.token; panel.node_id is ignored.
+# Mutually exclusive with machine mode.
+# panel:
+#   url: "https://panel.example.com"
+#   token: "shared-api-key"       # every node below authenticates with this token
+# kernel:
+#   type: auto                    # per-node transport picks the kernel
+#   config_dir: /etc/xboard-node  # optional; defaults to the config file's directory
+# nodes:
+#   - node_id: 1
+#   - node_id: 2
+#   - node_id: 3
+#
+# With no per-node kernel block, each node gets its own working directory
+# derived from the shared one — /etc/xboard-node/node-1, node-2, node-3 — so
+# their sing-box cache.db and cert stores never collide. geo_data_dir keeps
+# pointing at the shared directory so the geo databases are downloaded once.
+#
+# A per-node kernel block overrides field by field; anything you leave out keeps
+# the top-level value, and config_dir is still auto-derived unless you set it
+# explicitly. Note kernel: merges but cert: REPLACES the whole top-level block.
+# nodes:
+#   - node_id: 1
+#   - node_id: 2
+#     kernel:
+#       log_level: debug                      # config_dir still becomes node-2
+#       # config_dir: /srv/node-2             # only if you want a specific path
+#     cert:                                   # optional; replaces the top-level
+#       cert_mode: file                       # cert block entirely, no merging
+#       cert_file: /etc/ssl/node-2.pem
+#       key_file: /etc/ssl/node-2.key
+
 # ── Machine mode (one process manages all nodes the panel binds to it) ──
 # panel:
 #   url: "https://panel.example.com"
