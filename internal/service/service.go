@@ -867,14 +867,48 @@ func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
 
 // ensureRunning starts the kernel if it is not running and there are users +
 // config available. Returns true if the kernel is running afterwards.
-func (s *Service) ensureRunning() bool {
+//
+// `incoming` is the user set the caller is holding but has not recorded yet;
+// pass nil when there is none.
+//
+// The recorded set (s.lastUsers) is written by prepareUserState, which every
+// user-update path reaches only AFTER this check passes. So a node that learns
+// about its users while the kernel is down — it started before the panel had
+// any users for it, e.g. the node was deployed before its database was
+// attached — would deadlock: the kernel cannot start because no users are
+// recorded, and the users cannot be recorded because the update returns early
+// when the kernel is not running. It then discards a full user list every
+// push interval, forever, and only a process restart breaks the cycle.
+//
+// Seeding the start with the incoming set breaks that: the caller records it
+// immediately afterwards, so the state converges on the first push instead of
+// never.
+func (s *Service) ensureRunning(incoming []model.UserSpec) bool {
 	if s.kernel.IsRunning() {
 		return true
 	}
-	if len(s.lastUsers) > 0 && s.lastConfig != nil {
-		return s.startKernel(s.lastConfig, s.lastUsers)
+	if s.lastConfig == nil {
+		return false
 	}
-	return false
+	users := s.lastUsers
+	if len(users) == 0 {
+		users = incoming
+		if len(users) > 0 {
+			// The limiter has not seen these yet — prepareUserState runs only
+			// after this returns. The kernel resolves a user's speed/device
+			// limiter once, when it accepts a connection, and keeps it for that
+			// connection's whole life (RoutedConnection). A connection accepted
+			// between the inbound opening and prepareUserState running would
+			// therefore stay unlimited for hours. Prime the limiter first;
+			// prepareUserState repeating the call is harmless.
+			s.limiter.UpdateUsers(users)
+			s.speedTracker.UpdateBuckets()
+		}
+	}
+	if len(users) == 0 {
+		return false
+	}
+	return s.startKernel(s.lastConfig, users)
 }
 
 // ─── User update entry points ───────────────────────────────────────────────
@@ -969,8 +1003,21 @@ func (s *Service) applyUserUpdate(ctx context.Context, users []model.UserSpec, n
 // applyUserUpdateWithDiag applies a user-only change against a sync already
 // opened by beginUserSync, emitting the matching "sync complete".
 func (s *Service) applyUserUpdateWithDiag(ctx context.Context, users []model.UserSpec, newHash string, d syncDiagnostics) {
-	if !s.ensureRunning() {
+	wasRunning := s.kernel.IsRunning()
+	if !s.ensureRunning(users) {
 		s.finishUserSync(d, 0, "skipped_not_running", "skipped")
+		return
+	}
+	if !wasRunning {
+		// ensureRunning started the kernel seeded with exactly this set, so the
+		// in-place update below would diff it against itself: no adds, which the
+		// skipped-count heuristic would then report as "every user skipped".
+		// Record the state and close the sync here instead.
+		s.prepareUserState(users)
+		if newHash != "" {
+			s.lastUserHash = newHash
+		}
+		s.finishUserSync(d, 0, "success", "start_success")
 		return
 	}
 
@@ -1019,7 +1066,7 @@ func (s *Service) applyUserDelta(ctx context.Context, action string, deltaUsers 
 		}
 		merged := mergeUsers(s.lastUsers, deltaUsers)
 
-		if !s.ensureRunning() {
+		if !s.ensureRunning(merged) {
 			return
 		}
 

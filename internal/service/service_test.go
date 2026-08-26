@@ -26,6 +26,7 @@ type fakeKernel struct {
 	addCalls    int
 	removeCalls int
 
+	onStart       func([]model.UserSpec)
 	onUpdateUsers func([]model.UserSpec)
 	onAddUsers    func([]model.UserSpec)
 	onRemoveUsers func([]model.UserSpec)
@@ -40,6 +41,9 @@ func (f *fakeKernel) Capabilities() kernel.Capabilities { return kernel.Capabili
 func (f *fakeKernel) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
 	_, _, _ = nodeConfig, users, tls
 	f.startCalls++
+	if f.onStart != nil {
+		f.onStart(users)
+	}
 	if f.startErr != nil {
 		return f.startErr
 	}
