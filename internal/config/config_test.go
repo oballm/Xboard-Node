@@ -543,3 +543,73 @@ func TestInheritFrom_AutoTLSInheritedWhenChildHasNoCertConfig(t *testing.T) {
 		t.Error("auto_tls should be inherited when child has no cert config")
 	}
 }
+
+// A per-node kernel block that does NOT set config_dir must still get the
+// auto-derived base/node-N directory. config_dir's only consumer is sing-box's
+// cache.db — a bbolt single-writer file that two nodes can never share — so
+// the derivation must not hinge on whether an unrelated field (log_level,
+// custom_config, geo_data_dir) happens to be overridden.
+//
+// Regression guard: the original code keyed the derivation on
+// `entry.Kernel != nil`, so overriding log_level alone silently dropped the
+// node back to the shared top-level directory.
+func TestExpandNodes_DerivesConfigDirWhenKernelBlockOmitsIt(t *testing.T) {
+	path := writeTemp(t, `
+panel:
+  url: "https://p.example.com"
+  token: "tok"
+kernel:
+  type: singbox
+  config_dir: /etc/xboard-node
+  log_level: warn
+  custom_config: /etc/xboard-node/extras.json
+nodes:
+  - node_id: 1
+  - node_id: 2
+    kernel:
+      log_level: debug
+  - node_id: 3
+    kernel:
+      config_dir: /srv/node3
+`)
+	root, err := LoadRoot(path)
+	if err != nil {
+		t.Fatalf("LoadRoot: %v", err)
+	}
+	instances, err := root.NormalizeInstances()
+	if err != nil {
+		t.Fatalf("NormalizeInstances: %v", err)
+	}
+	byID := map[int]*Config{}
+	for _, inst := range instances {
+		for _, n := range inst.ExpandNodes() {
+			byID[n.Panel.NodeID] = n
+		}
+	}
+
+	// No kernel block at all — the baseline.
+	if got := byID[1].Kernel.ConfigDir; got != "/etc/xboard-node/node-1" {
+		t.Errorf("node 1 config_dir = %q, want /etc/xboard-node/node-1", got)
+	}
+
+	// Kernel block without config_dir: still derived, and the override applied.
+	if got := byID[2].Kernel.ConfigDir; got != "/etc/xboard-node/node-2" {
+		t.Errorf("node 2 config_dir = %q, want /etc/xboard-node/node-2 "+
+			"(overriding log_level must not disable the derivation)", got)
+	}
+	if got := byID[2].Kernel.LogLevel; got != "debug" {
+		t.Errorf("node 2 log_level = %q, want debug", got)
+	}
+	// Fields the node did not override still inherit from the top level.
+	if got := byID[2].Kernel.CustomConfig; got != "/etc/xboard-node/extras.json" {
+		t.Errorf("node 2 custom_config = %q, want the inherited top-level value", got)
+	}
+
+	// Explicit config_dir still wins.
+	if got := byID[3].Kernel.ConfigDir; got != "/srv/node3" {
+		t.Errorf("node 3 config_dir = %q, want /srv/node3", got)
+	}
+	if got := byID[3].Kernel.LogLevel; got != "warn" {
+		t.Errorf("node 3 log_level = %q, want the inherited warn", got)
+	}
+}

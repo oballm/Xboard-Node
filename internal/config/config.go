@@ -752,16 +752,33 @@ func (c *Config) ExpandNodes() []*Config {
 		nodeCfg.Panel.NodeID = entry.NodeID
 		nodeCfg.Panel.NodeType = entry.NodeType
 
-		// Per-node kernel overrides
-		if entry.Kernel != nil {
-			if entry.Kernel.ConfigDir != "" {
-				nodeCfg.Kernel.ConfigDir = entry.Kernel.ConfigDir
-				if nodeCfg.Kernel.GeoDataDir == c.Kernel.ConfigDir {
-					// GeoDataDir was defaulted to ConfigDir — keep it pointing at
-					// the new ConfigDir unless the user set it explicitly.
-					nodeCfg.Kernel.GeoDataDir = entry.Kernel.ConfigDir
-				}
+		// config_dir is resolved on its own: an explicit per-node value wins,
+		// otherwise it is derived as base/node-N. The derivation must NOT hinge
+		// on whether a kernel block exists at all — a node that only overrides
+		// log_level still needs its own directory, because config_dir's sole
+		// consumer is sing-box's cache.db (a bbolt single-writer file two nodes
+		// can never share). The other three override fields have no bearing on
+		// the directory, so they are applied separately below.
+		if entry.Kernel != nil && entry.Kernel.ConfigDir != "" {
+			nodeCfg.Kernel.ConfigDir = entry.Kernel.ConfigDir
+			if nodeCfg.Kernel.GeoDataDir == c.Kernel.ConfigDir {
+				// GeoDataDir was defaulted to ConfigDir — keep it pointing at
+				// the new ConfigDir unless the user set it explicitly.
+				nodeCfg.Kernel.GeoDataDir = entry.Kernel.ConfigDir
 			}
+		} else {
+			// Auto-derive a unique config_dir per node to avoid conflicts.
+			nodeCfg.Kernel.ConfigDir = fmt.Sprintf("%s/node-%d", c.Kernel.ConfigDir, entry.NodeID)
+			if nodeCfg.Kernel.GeoDataDir == c.Kernel.ConfigDir {
+				// Share the geo data dir with the base dir to avoid re-downloading.
+				nodeCfg.Kernel.GeoDataDir = c.Kernel.GeoDataDir
+			}
+		}
+
+		// Remaining per-node kernel overrides — independent of config_dir.
+		// Applied after the block above so an explicit per-node geo_data_dir
+		// still wins over the "follow config_dir" rule.
+		if entry.Kernel != nil {
 			if entry.Kernel.GeoDataDir != "" {
 				nodeCfg.Kernel.GeoDataDir = entry.Kernel.GeoDataDir
 			}
@@ -770,13 +787,6 @@ func (c *Config) ExpandNodes() []*Config {
 			}
 			if entry.Kernel.CustomConfig != "" {
 				nodeCfg.Kernel.CustomConfig = entry.Kernel.CustomConfig
-			}
-		} else {
-			// Auto-derive a unique config_dir per node to avoid conflicts.
-			nodeCfg.Kernel.ConfigDir = fmt.Sprintf("%s/node-%d", c.Kernel.ConfigDir, entry.NodeID)
-			if nodeCfg.Kernel.GeoDataDir == c.Kernel.ConfigDir {
-				// Share the geo data dir with the base dir to avoid re-downloading.
-				nodeCfg.Kernel.GeoDataDir = c.Kernel.GeoDataDir
 			}
 		}
 
