@@ -193,6 +193,17 @@ func newKernelByType(kcfg config.KernelConfig, kernelType string) kernel.Kernel 
 	}
 }
 
+// syncKernelRunning refreshes the metrics mirror from the live kernel. The
+// mirror exists because wsMetrics runs on the WS goroutine and must not touch
+// s.kernel (ensureKernelType reassigns it on the Run goroutine). Re-reading
+// IsRunning() here instead of storing a literal keeps the mirror honest for
+// state changes the Service did not perform itself — a kernel that tore itself
+// down inside Reload, or xray's internal restart in UpdateUsers.
+// Must run on the Run goroutine.
+func (s *Service) syncKernelRunning() {
+	s.kernelRunning.Store(s.kernel != nil && s.kernel.IsRunning())
+}
+
 // ensureKernelType hot-swaps s.kernel to the requested concrete type when it
 // differs from the currently built kernel. The freshly built kernel is left
 // stopped; the caller (startKernel / applyChanges) starts it. Must run on the
@@ -205,10 +216,11 @@ func (s *Service) ensureKernelType(want string) {
 	prev := s.kernelType
 	if s.kernel != nil {
 		s.kernel.Stop()
-		s.kernelRunning.Store(false)
 	}
 	s.kernel = newKernelByType(s.cfg.Kernel, want)
 	s.kernelType = want
+	// The freshly built kernel is stopped; the caller starts it.
+	s.syncKernelRunning()
 	// Re-attach the limiter hooks to the freshly built kernel.
 	s.kernel.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
 	s.kernel.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
@@ -828,11 +840,15 @@ func (s *Service) restoreUserState(users []model.UserSpec, hash string) {
 // startKernel starts (or restarts) the kernel with the given config/users and
 // records the successfully applied state. Returns false on error.
 func (s *Service) startKernel(nc *model.NodeSpec, users []model.UserSpec) bool {
+	// Covers both exits: a failed Start must clear the mirror too, otherwise a
+	// kernel that died and could not be restarted keeps reporting kernel_status
+	// = true to the panel.
+	defer s.syncKernelRunning()
+
 	if err := s.kernel.Start(nc, users, s.cert.TLSCert()); err != nil {
 		nlog.Core().Error("failed to start kernel", "error", err)
 		return false
 	}
-	s.kernelRunning.Store(true)
 
 	s.appliedState.Config = nc
 	s.appliedState.Users = users
@@ -1120,7 +1136,7 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	if s.lastConfig == nil || len(s.lastUsers) == 0 {
 		if len(s.lastUsers) == 0 {
 			s.kernel.Stop()
-			s.kernelRunning.Store(false)
+			s.syncKernelRunning()
 			s.appliedState.Users = nil
 			return "stopped_no_users"
 		}
@@ -1137,7 +1153,7 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 			}
 			return "failed"
 		}
-		s.kernelRunning.Store(true)
+		s.syncKernelRunning()
 		s.appliedState.Config = s.lastConfig
 		s.appliedState.Users = s.lastUsers
 		if s.nodeLog != nil {
