@@ -803,4 +803,22 @@ func (c *trackedPacketConn) UnwrapPacketWriter() (N.PacketWriter, []N.CountFunc)
 
 func (c *trackedPacketConn) Upstream() any           { return c.PacketConn }
 func (c *trackedPacketConn) ReaderReplaceable() bool { return true }
-func (c *trackedPacketConn) WriterReplaceable() bool { return true }
+
+// WriterReplaceable is deliberately false while the other three are true.
+//
+// sing's four counter-unwrapping helpers are not symmetric. UnwrapCountReader,
+// UnwrapCountWriter and UnwrapCountPacketReader all test for the counter
+// interface FIRST and only then walk the upstream chain, so a replaceable
+// wrapper still gets its CountFunc collected. UnwrapCountPacketWriter instead
+// calls UnwrapPacketWriter first, which skips every layer that reports
+// WriterReplaceable() == true — including this one — and by the time it looks
+// for a PacketWriteCounter it is already holding the bare conn.
+//
+// With true, the download CountFunc was therefore never registered and no
+// downstream byte of any proxied UDP session was ever billed: measured
+// end-to-end, 300 KB delivered to a client showed up as down=0. Reporting false
+// stops the unwrap here so the counter check finds us; writes still land on
+// c.PacketConn afterwards, so nothing is counted twice and WritePacket stays
+// unused. trackedConn keeps true because the TCP helpers check the counter
+// first — do not "make these consistent".
+func (c *trackedPacketConn) WriterReplaceable() bool { return false }
