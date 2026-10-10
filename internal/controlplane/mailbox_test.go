@@ -1,9 +1,11 @@
 package controlplane
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/cedar2025/xboard-node/internal/panel"
 )
 
 func TestNodeMailboxLatestStateAndNotifyCollapse(t *testing.T) {
@@ -160,5 +162,28 @@ func TestNodeMailboxDeltaFailedApplyNotifies(t *testing.T) {
 	state := mb.DrainIfReady()
 	if !state.NeedsReconcile {
 		t.Fatal("expected NeedsReconcile for invalid delta action")
+	}
+}
+
+// The service hashes json.Marshal(spec) to detect config changes, so a clone
+// that turns an empty slice into nil (or vice versa) reads as a config change
+// and forces a kernel restart. Use a spec built the way REST/WS snapshots are.
+func TestCloneNodeSpecPreservesSerialization(t *testing.T) {
+	spec := model.NodeSpecFromPanel(&panel.NodeConfig{Protocol: "vless", ServerPort: 21001})
+	if spec.Routes == nil || spec.CustomOutbounds == nil || spec.CustomRouteRules == nil {
+		t.Fatal("precondition: NodeSpecFromPanel should yield empty non-nil slices")
+	}
+	want, _ := json.Marshal(spec)
+	got, _ := json.Marshal(cloneNodeSpec(spec))
+	if string(got) != string(want) {
+		t.Fatalf("clone serializes differently:\n got: %s\nwant: %s", got, want)
+	}
+
+	mb := NewNodeMailbox()
+	mb.MarkReady()
+	mb.Apply(Event{Type: EventSyncConfig, Config: spec})
+	viaMailbox, _ := json.Marshal(mb.DrainIfReady().Config)
+	if string(viaMailbox) != string(want) {
+		t.Fatalf("mailbox round-trip serializes differently:\n got: %s\nwant: %s", viaMailbox, want)
 	}
 }
