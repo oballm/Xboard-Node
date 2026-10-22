@@ -90,7 +90,11 @@ type WSClientConfig struct {
 	HandshakeTimeout time.Duration
 	BackoffInitial   time.Duration
 	BackoffMax       time.Duration
-	MachineID        int
+	// ReadTimeout drops the connection when nothing arrives for this long.
+	// Without it a half-open TCP connection keeps IsConnected() true forever,
+	// and the service skips REST polling while receiving no pushes.
+	ReadTimeout time.Duration
+	MachineID   int
 }
 
 // WSClient connects to the panel's Workerman WS server using native WebSocket.
@@ -129,6 +133,11 @@ func NewWSClient(wsURL string, token string, nodeID int, cfg WSClientConfig, onE
 	}
 	if cfg.BackoffMax == 0 {
 		cfg.BackoffMax = 60 * time.Second
+	}
+	if cfg.ReadTimeout == 0 {
+		// Panels ping every 30s (panel-proxy) or 55s (Xboard); tolerate one
+		// missed ping on either.
+		cfg.ReadTimeout = 150 * time.Second
 	}
 	return &WSClient{
 		wsURL:    wsURL,
@@ -225,6 +234,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 
 	// Read first message — expect auth.success or error
 	var firstMsg wsMessage
+	conn.SetReadDeadline(time.Now().Add(w.cfg.ReadTimeout))
 	if err := conn.ReadJSON(&firstMsg); err != nil {
 		return fmt.Errorf("read auth response: %w", err)
 	}
@@ -267,6 +277,7 @@ func (w *WSClient) connect(ctx context.Context) error {
 		defer close(done)
 		for {
 			var msg wsMessage
+			conn.SetReadDeadline(time.Now().Add(w.cfg.ReadTimeout))
 			if err := conn.ReadJSON(&msg); err != nil {
 				select {
 				case errCh <- err:
