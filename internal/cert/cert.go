@@ -56,6 +56,7 @@ type Manager struct {
 
 	magic           *certmagic.Config
 	renewed         atomic.Bool
+	renewCh         chan struct{} // wakes the service loop after a renewal; cap 1
 	acmeStarted     bool
 	acmeFingerprint string
 	acmeCancel      context.CancelFunc
@@ -69,7 +70,7 @@ type certMaterial struct {
 
 // NewManager creates a certificate manager.
 func NewManager(cfg config.CertConfig) *Manager {
-	return &Manager{cfg: cfg}
+	return &Manager{cfg: cfg, renewCh: make(chan struct{}, 1)}
 }
 
 // storePEM atomically swaps the in-memory cert material and persists to disk
@@ -247,6 +248,20 @@ func (m *Manager) HasCert() bool {
 	return mat != nil && len(mat.certPEM) > 0 && len(mat.keyPEM) > 0
 }
 func (m *Manager) CertRenewed() bool { return m.renewed.Swap(false) }
+
+// RenewalNotify fires after a background ACME renewal has swapped in new PEM.
+// The service loop must react to it directly: when push is connected it never
+// polls, so a renewal noticed only by the poll path would go unapplied until
+// the old certificate expired.
+func (m *Manager) RenewalNotify() <-chan struct{} { return m.renewCh }
+
+func (m *Manager) markRenewed() {
+	m.renewed.Store(true)
+	select {
+	case m.renewCh <- struct{}{}:
+	default:
+	}
+}
 
 // TLSCert returns the current PEM material as a kernel.TLSCert.
 func (m *Manager) TLSCert() kernel.TLSCert {
@@ -431,7 +446,7 @@ func (m *Manager) startACME(ctx context.Context, dnsSolver *certmagic.DNS01Solve
 				nlog.Core().Error("failed to reload cert after renewal", "error", err)
 				return nil
 			}
-			m.renewed.Store(true)
+			m.markRenewed()
 			nlog.Core().Info("TLS certificate reloaded after renewal", "domain", m.cfg.Domain)
 			return nil
 		},

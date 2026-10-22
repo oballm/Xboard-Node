@@ -91,11 +91,10 @@ type Service struct {
 
 // pullResult carries the outcome of an async pullViaAPI back to the main goroutine.
 type pullResult struct {
-	config      *model.NodeSpec
-	users       []model.UserSpec
-	configHash  string
-	userHash    string
-	certChanged bool
+	config     *model.NodeSpec
+	users      []model.UserSpec
+	configHash string
+	userHash   string
 }
 
 // apiBackoff implements simple exponential backoff for API failures.
@@ -314,6 +313,12 @@ func (s *Service) Run(ctx context.Context) error {
 
 		case result := <-s.pullResults:
 			s.applyPullResult(ctx, result)
+
+		case <-s.cert.RenewalNotify():
+			if s.cert.CertRenewed() {
+				nlog.Core().Info("certificate renewed, reloading kernel TLS")
+				s.applyChanges(ctx, true, false)
+			}
 
 		case <-wsDiscoveryTicker.C:
 			s.wsDiscovery(ctx)
@@ -706,8 +711,6 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 	}
 
 	currentConfigHash := s.lastConfigHash
-	certChanged := s.cert.CertRenewed()
-
 	go func() {
 		defer s.pullActive.Store(false)
 		snapshot, err := s.source.Poll(ctx)
@@ -718,11 +721,11 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 		}
 		s.pullBackoff.onSuccess()
 
-		result := pullResult{certChanged: certChanged}
+		var result pullResult
 		if snapshot.Config != nil {
 			result.config = snapshot.Config
 			result.configHash = computeConfigHash(snapshot.Config)
-			if result.configHash == currentConfigHash && !certChanged {
+			if result.configHash == currentConfigHash {
 				result.config = nil
 			}
 		}
@@ -742,11 +745,6 @@ func (s *Service) pullViaAPIAsync(ctx context.Context) {
 func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 	s.wsResyncPending.Store(false)
 	configChanged := false
-
-	if result.certChanged {
-		nlog.Core().Info("certificate renewed, kernel restart needed")
-		configChanged = true
-	}
 
 	if result.config != nil {
 		if want, err := s.resolveKernelType(result.config); err != nil {
