@@ -1189,7 +1189,7 @@ func (s *Service) applyChanges(ctx context.Context, configChanged, usersChanged 
 	}
 
 	// If config changed, delegate to kernel.Reload. The kernel implementation
-	// decides whether to hot-swap users, reconstruct inbounds, or restart itself.
+	// decides whether to hot-swap users or restart itself.
 	if configChanged && s.kernel.IsRunning() {
 		if err := s.kernel.Reload(s.lastConfig, s.lastUsers, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn(fmt.Sprintf("reload failed, restarting: %v", err))

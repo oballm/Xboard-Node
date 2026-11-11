@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	tun "github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	singM "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
@@ -210,6 +211,14 @@ func (t *ConnTracker) ClearGlobalDevices() {
 }
 
 // ─── adapter.ConnectionTracker ──────────────────────────────────────────────
+
+// RoutedFlow is for packet-level flows forwarded by TUN / cloudflared inbounds
+// (sing-box 1.14 pre-match path). Those carry no user and never come from the
+// proxy inbounds this node serves, so there is nothing to count; nil tells the
+// router to skip this tracker.
+func (t *ConnTracker) RoutedFlow(context.Context, adapter.InboundContext, adapter.Rule, adapter.Outbound) tun.FlowTracker {
+	return nil
+}
 
 // RoutedConnection wraps a TCP conn to count bytes per-user, track IPs,
 // and optionally rate-limit. Gate-keeps device limits at connection time.

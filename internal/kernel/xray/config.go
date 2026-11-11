@@ -326,6 +326,15 @@ var ss2022Methods = map[string]ss2022Config{
 	"2022-blake3-chacha20-poly1305": {"2022-blake3-chacha20-poly1305", 32},
 }
 
+// ss2022UserKey is a user's SS2022 PSK: the UUID's bytes, cut or zero-padded
+// to the method's key size. The config builder and the hot-reload user path
+// must derive it the same way.
+func ss2022UserKey(size int, uuid string) []byte {
+	key := make([]byte, size)
+	copy(key, uuid)
+	return key
+}
+
 func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	ss2022, isSS2022 := ss2022Methods[nc.Cipher]
 
@@ -334,15 +343,10 @@ func buildShadowsocks(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 	if isSS2022 {
 		// SS2022: server key at top level, per-user key must be Base64 of fixed-length raw bytes.
 		// Only blake3-aes-* supports multi-user in Xray; chacha20 variant is single-user only.
-		rawBuf := make([]byte, ss2022.size)
 		for i := range users {
 			u := &users[i]
-			for j := range rawBuf {
-				rawBuf[j] = 0
-			}
-			copy(rawBuf, u.UUID)
 			clients = append(clients, M{
-				"password": base64.StdEncoding.EncodeToString(rawBuf),
+				"password": base64.StdEncoding.EncodeToString(ss2022UserKey(ss2022.size, u.UUID)),
 				"email":    userEmail(u.ID),
 			})
 		}
