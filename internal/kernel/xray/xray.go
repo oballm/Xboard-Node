@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -618,9 +617,11 @@ func toMemoryUser(proto string, nc *model.NodeSpec, u model.UserSpec) (*protocol
 		}
 
 	case "shadowsocks":
-		if strings.HasPrefix(nc.Cipher, "2022-blake3-") {
-			// 2022-blake3 multi-user mode
-			mu.Account = &ss2022.MemoryAccount{Key: u.UUID}
+		if m, ok := ss2022Methods[nc.Cipher]; ok {
+			// 2022-blake3 multi-user mode. Same key as buildShadowsocks:
+			// before this, the raw UUID was passed and failed the kernel's
+			// base64 decode, so users added by hot reload could not connect.
+			mu.Account = &ss2022.MemoryAccount{Key: ss2022UserKey(m.size, u.UUID)}
 		} else {
 			// Traditional SS — build via getCipher path
 			ct := parseCipherType(nc.Cipher)
@@ -660,7 +661,9 @@ func parseCipherType(cipher string) shadowsocks.CipherType {
 	case "xchacha20-ietf-poly1305", "xchacha20-poly1305":
 		return shadowsocks.CipherType_XCHACHA20_POLY1305
 	case "none", "plain":
-		return shadowsocks.CipherType_NONE
+		// Removed in Xray v26 (unencrypted Shadowsocks). UNKNOWN makes the
+		// account build fail loudly instead of silently using another cipher.
+		return shadowsocks.CipherType_UNKNOWN
 	default:
 		return shadowsocks.CipherType_AES_256_GCM
 	}
