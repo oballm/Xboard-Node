@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -515,6 +516,12 @@ func (s *SingBox) AddUsers(users []model.UserSpec) (int, error) {
 // RemoveUsers hot-swaps users out of running inbounds. Zero connection disruption
 // for remaining users.
 func (s *SingBox) RemoveUsers(users []model.UserSpec) (int, error) {
+	var (
+		ct      *ConnTracker
+		toClose []model.UserSpec
+	)
+	// Runs after the deferred Unlock below (defers are LIFO).
+	defer func() { closeRemovedUsers(ct, toClose) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -526,16 +533,15 @@ func (s *SingBox) RemoveUsers(users []model.UserSpec) (int, error) {
 	for _, u := range users {
 		removeSet[u.ID] = struct{}{}
 	}
-	var kept []model.UserSpec
-	removed := 0
+	var kept, gone []model.UserSpec
 	for _, u := range s.users {
 		if _, rm := removeSet[u.ID]; rm {
-			removed++
+			gone = append(gone, u)
 		} else {
 			kept = append(kept, u)
 		}
 	}
-	if removed == 0 {
+	if len(gone) == 0 {
 		return 0, nil
 	}
 
@@ -543,11 +549,18 @@ func (s *SingBox) RemoveUsers(users []model.UserSpec) (int, error) {
 		return 0, err
 	}
 	s.users = kept
-	return removed, nil
+	ct, toClose = s.connTracker, gone
+	return len(gone), nil
 }
 
 // UpdateUsers replaces the entire user set atomically via hot-swap.
 func (s *SingBox) UpdateUsers(users []model.UserSpec) (added, removed int, err error) {
+	var (
+		ct      *ConnTracker
+		toClose []model.UserSpec
+	)
+	// Runs after the deferred Unlock below (defers are LIFO).
+	defer func() { closeRemovedUsers(ct, toClose) }()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -571,6 +584,7 @@ func (s *SingBox) UpdateUsers(users []model.UserSpec) (added, removed int, err e
 		return 0, 0, err
 	}
 	s.users = users
+	ct, toClose = s.connTracker, toRemove
 	return
 }
 
@@ -599,6 +613,14 @@ func (s *SingBox) reloadInboundsLocked(users []model.UserSpec) error {
 	}
 
 	nopFactory := singLog.NewNOPFactory()
+
+	// While inbounds are swapped one by one, a user being added may already
+	// authenticate on an updated inbound. The tracker rejects users it does not
+	// know, so widen its map to old ∪ new first; it is narrowed to exactly the
+	// new set once every inbound is updated (below).
+	if s.connTracker != nil {
+		s.connTracker.SetUserMap(buildUserMap(append(append([]model.UserSpec(nil), s.users...), users...)))
+	}
 
 	for _, inb := range opts.Inbounds {
 		tag := inb.Tag
@@ -704,9 +726,31 @@ func (s *SingBox) CloseUserConnections(_ context.Context, uuid string) error {
 // connections to the correct user. All sing-box protocols use the user's UUID
 // as the inbound name/username, so this covers every protocol.
 func buildUserMap(users []model.UserSpec) map[string]int {
-	m := make(map[string]int, len(users))
+	m := make(map[string]int, 2*len(users))
 	for _, u := range users {
 		m[u.UUID] = u.ID
+		// Naive authenticates with username = decimal user ID (buildNaive), so
+		// its connections carry that as metadata.User. Without this key the
+		// tracker would reject every naive connection as an unknown user.
+		// UUIDs are never purely numeric, so the keys cannot collide.
+		m[strconv.Itoa(u.ID)] = u.ID
 	}
 	return m
+}
+
+// closeRemovedUsers ends every open connection of the given users. Call it
+// after the inbound no longer accepts them and WITHOUT s.mu held: closing a
+// tracked conn re-enters the tracker, never this struct, but keeping kernel
+// locks out of socket teardown is the cheap safe choice.
+func closeRemovedUsers(ct *ConnTracker, removed []model.UserSpec) {
+	if ct == nil || len(removed) == 0 {
+		return
+	}
+	total := 0
+	for _, u := range removed {
+		total += ct.CloseByUUID(u.UUID)
+	}
+	if total > 0 {
+		nlog.Core().Info("sing-box: closed connections of removed users", "users", len(removed), "connections", total)
+	}
 }

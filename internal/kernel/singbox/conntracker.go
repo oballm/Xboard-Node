@@ -121,11 +121,20 @@ func (u *userStats) aliveIPList() map[string]bool {
 //   - Hooking into sing's ReadCounter/WriteCounter for zero-copy byte counting
 //   - Close callback to decrement IP refcounts
 //   - Per-connection rate limit token accumulation (amortized WaitN)
+//
+// connEntry is what force-close needs to know about one open connection: the
+// user it belongs to and the tracked wrapper to close (closing the wrapper
+// also releases its device/IP bookkeeping).
+type connEntry struct {
+	uuid   string
+	closer io.Closer
+}
+
 type ConnTracker struct {
 	usersMu sync.RWMutex
-	users   map[int]*userStats  // userID → stats
-	uuidMap map[string]int      // UUID → userID (for lookup in RoutedConnection)
-	connMap map[string]net.Conn // connID → conn (only for force-close support)
+	users   map[int]*userStats   // userID → stats
+	uuidMap map[string]int       // UUID → userID (for lookup in RoutedConnection)
+	connMap map[string]connEntry // connID → open TCP/UDP conn (force-close support)
 
 	idCounter atomic.Int64
 
@@ -146,7 +155,7 @@ func NewConnTracker(_ int) *ConnTracker {
 	return &ConnTracker{
 		users:         make(map[int]*userStats),
 		uuidMap:       make(map[string]int),
-		connMap:       make(map[string]net.Conn),
+		connMap:       make(map[string]connEntry),
 		globalDevices: make(map[int]map[string]bool),
 	}
 }
@@ -217,6 +226,16 @@ func (t *ConnTracker) RoutedConnection(
 	us := t.users[uid]
 	t.usersMu.RUnlock()
 
+	if us == nil {
+		// Not (or no longer) a current user. Multiplexing protocols (anytls,
+		// hysteria2, tuic, vless mux) authenticate once per session and keep
+		// opening streams on it, so a removed user's old session would
+		// otherwise keep routing new streams — unbilled and unlimited.
+		nlog.Core().Debug("singbox: rejecting connection from unknown or removed user", "user", uuid, "ip", sourceIP)
+		conn.Close()
+		return conn
+	}
+
 	// Device limit gate-keeping
 	if dlf := t.deviceLimitFunc.Load(); dlf != nil {
 		if limit, hasLimit := (*dlf)(uuid); hasLimit {
@@ -230,23 +249,16 @@ func (t *ConnTracker) RoutedConnection(
 	}
 
 	// Register connection
-	if us != nil {
-		us.addConn(sourceIP)
-	}
+	us.addConn(sourceIP)
 
 	connID := t.nextID()
-
-	// Store conn reference for force-close support
-	t.usersMu.Lock()
-	t.connMap[connID] = conn
-	t.usersMu.Unlock()
 
 	var lim *rate.Limiter
 	if slf := t.speedLimitFunc.Load(); slf != nil {
 		lim = (*slf)(uuid)
 	}
 
-	return &trackedConn{
+	tc := &trackedConn{
 		Conn:     conn,
 		tracker:  t,
 		us:       us,
@@ -256,12 +268,15 @@ func (t *ConnTracker) RoutedConnection(
 		limiter:  lim,
 		ctx:      ctx,
 	}
+	// Store the wrapper for force-close support (CloseByID / CloseByUUID).
+	t.usersMu.Lock()
+	t.connMap[connID] = connEntry{uuid: uuid, closer: tc}
+	t.usersMu.Unlock()
+	return tc
 }
 
-// RoutedPacketConnection wraps UDP with per-user counting (UDP not in connMap).
-// Note: UDP connections are NOT stored in connMap because connMap is typed as
-// map[string]net.Conn, but PacketConn is a different interface. Force-close
-// for UDP connections is handled directly via trackedPacketConn.Close().
+// RoutedPacketConnection wraps UDP with per-user counting. It is registered in
+// connMap like TCP so CloseByUUID also ends a removed user's UDP sessions.
 func (t *ConnTracker) RoutedPacketConnection(
 	ctx context.Context, conn N.PacketConn,
 	metadata adapter.InboundContext,
@@ -275,6 +290,13 @@ func (t *ConnTracker) RoutedPacketConnection(
 	us := t.users[uid]
 	t.usersMu.RUnlock()
 
+	if us == nil {
+		// See RoutedConnection: no unbilled traffic for removed users.
+		nlog.Core().Debug("singbox: rejecting UDP connection from unknown or removed user", "user", uuid, "ip", sourceIP)
+		conn.Close()
+		return conn
+	}
+
 	// Device limit gate-keeping
 	if dlf := t.deviceLimitFunc.Load(); dlf != nil {
 		if limit, hasLimit := (*dlf)(uuid); hasLimit {
@@ -287,9 +309,7 @@ func (t *ConnTracker) RoutedPacketConnection(
 		}
 	}
 
-	if us != nil {
-		us.addConn(sourceIP)
-	}
+	us.addConn(sourceIP)
 
 	connID := t.nextID()
 
@@ -298,7 +318,7 @@ func (t *ConnTracker) RoutedPacketConnection(
 		lim = (*slf)(uuid)
 	}
 
-	return &trackedPacketConn{
+	pc := &trackedPacketConn{
 		PacketConn: conn,
 		tracker:    t,
 		us:         us,
@@ -308,6 +328,10 @@ func (t *ConnTracker) RoutedPacketConnection(
 		limiter:    lim,
 		ctx:        ctx,
 	}
+	t.usersMu.Lock()
+	t.connMap[connID] = connEntry{uuid: uuid, closer: pc}
+	t.usersMu.Unlock()
+	return pc
 }
 
 // checkDeviceGate rejects connections exceeding device limit.
@@ -443,23 +467,40 @@ func (t *ConnTracker) GetUserTraffic() (traffic map[int][2]int64, aliveIPs map[i
 // CloseByID force-closes a connection by its ID.
 func (t *ConnTracker) CloseByID(id string) bool {
 	t.usersMu.RLock()
-	conn, ok := t.connMap[id]
+	entry, ok := t.connMap[id]
 	t.usersMu.RUnlock()
 	if !ok {
 		return false
 	}
-	if conn != nil {
-		conn.Close()
+	if entry.closer != nil {
+		entry.closer.Close()
 	}
 	return true
 }
 
 // CloseByUUID force-closes ALL connections for a given user UUID.
+//
+// Removing a user from an inbound only stops new authentications; streams and
+// sessions that are already open keep flowing (observed in production: an
+// over-quota anytls user kept downloading for 34 minutes). This closes them.
+// Bytes counted before the close stay in the user's stats and are reported.
+// Closing happens outside the lock: a tracked conn's Close takes usersMu.
 func (t *ConnTracker) CloseByUUID(uuid string) int {
-	// This is a no-op for now — sing-box doesn't expose per-user connection
-	// kill easily. The kernel's RemoveUsers removes the inbound user which
-	// prevents new connections, and existing connections will fail on next I/O.
-	return 0
+	if uuid == "" {
+		return 0
+	}
+	var closers []io.Closer
+	t.usersMu.RLock()
+	for _, e := range t.connMap {
+		if e.uuid == uuid && e.closer != nil {
+			closers = append(closers, e.closer)
+		}
+	}
+	t.usersMu.RUnlock()
+	for _, c := range closers {
+		c.Close()
+	}
+	return len(closers)
 }
 
 // ActiveCount returns the total number of active connections.
