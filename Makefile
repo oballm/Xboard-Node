@@ -23,8 +23,14 @@ build-linux-arm64:
 build-all: build-linux build-linux-arm64
 
 # Run tests
+TEST_TAGS := with_quic with_utls with_wireguard with_clash_api
+
+# The race run skips the anytls end-to-end cases (sing-anytls races, not
+# ours; see skipAnyTLSUnderRace), so the end-to-end tests run once more
+# without -race to keep anytls covered.
 test:
-	go test -v -race -count=1 -tags "with_quic with_utls with_wireguard with_clash_api" ./internal/...
+	go test -v -race -count=1 -tags "$(TEST_TAGS)" ./internal/...
+	go test -v -count=1 -tags "$(TEST_TAGS)" -run 'TestE2E' ./internal/kernel/singbox/
 
 # Clean build artifacts
 clean:

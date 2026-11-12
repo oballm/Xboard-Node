@@ -110,6 +110,7 @@ func TestE2EReloadUsersOnlyKeepsKernel(t *testing.T) {
 		t.Skip("e2e")
 	}
 	p := e2eProtos[0] // anytls (TLS)
+	skipAnyTLSUnderRace(t, p.name)
 	src := startSource(t)
 	userA := model.UserSpec{ID: 1, UUID: e2eUUIDA}
 	userB := model.UserSpec{ID: 2, UUID: e2eUUIDB}
@@ -145,6 +146,7 @@ func TestE2EReloadCertChangeRestartsKernel(t *testing.T) {
 		t.Skip("e2e")
 	}
 	p := e2eProtos[0] // anytls (TLS)
+	skipAnyTLSUnderRace(t, p.name)
 	src := startSource(t)
 	userA := model.UserSpec{ID: 1, UUID: e2eUUIDA}
 	s, port := startServer(t, p, []model.UserSpec{userA})
@@ -309,6 +311,7 @@ func TestE2ERestartClosesIdleSessions(t *testing.T) {
 	}
 	for _, p := range []e2eProto{e2eProtos[0], grpc, h2} {
 		t.Run(p.name, func(t *testing.T) {
+			skipAnyTLSUnderRace(t, p.name)
 			src := startSource(t)
 			userA := model.UserSpec{ID: 1, UUID: e2eUUIDA}
 			s, port := startServer(t, p, []model.UserSpec{userA})
