@@ -2,6 +2,8 @@ module github.com/cedar2025/xboard-node
 
 go 1.27
 
+toolchain go1.27.4
+
 require (
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6
 	github.com/fsnotify/fsnotify v1.9.0
