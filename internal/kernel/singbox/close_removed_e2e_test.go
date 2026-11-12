@@ -46,12 +46,23 @@ const (
 func freePort(t *testing.T, network string) int {
 	t.Helper()
 	if network == "udp" {
-		c, err := net.ListenPacket("udp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatal(err)
+		// Hysteria port hopping on a host redirects a UDP port range to
+		// another server, local traffic included (an iptables OUTPUT
+		// REDIRECT for 30001-50000 on the dev box). A QUIC test on such a
+		// port reaches that server and fails with "tls: internal error", so
+		// keep UDP test ports out of that range.
+		for i := 0; i < 100; i++ {
+			c, err := net.ListenPacket("udp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			port := c.LocalAddr().(*net.UDPAddr).Port
+			c.Close()
+			if port <= 30000 || port > 50000 {
+				return port
+			}
 		}
-		defer c.Close()
-		return c.LocalAddr().(*net.UDPAddr).Port
+		t.Fatal("no free UDP port outside 30001-50000")
 	}
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
