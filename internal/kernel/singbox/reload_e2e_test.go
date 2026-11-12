@@ -286,7 +286,8 @@ func TestE2EReloadFailingConfigRollsBack(t *testing.T) {
 }
 
 // A restart closes connections a client keeps across requests (an anytls
-// session, the HTTP/2 connection under gRPC). Left open, they stay attached
+// session, the HTTP/2 connection under gRPC or the h2 transport; naive's
+// HTTP/2 CONNECT is the same case, checked by hand). Left open, they stay attached
 // to the stopped box: every new request on them fails at once and they never
 // idle out, so the client is stuck until it restarts.
 func TestE2ERestartClosesIdleSessions(t *testing.T) {
@@ -303,7 +304,17 @@ func TestE2ERestartClosesIdleSessions(t *testing.T) {
 			return fmt.Sprintf(`{"type":"vless","tag":"out","server":"127.0.0.1","server_port":%d,"uuid":%q,"tls":{"enabled":true,"server_name":"test.local","insecure":true},"transport":{"type":"grpc","service_name":"g"}}`, p, u)
 		},
 	}
-	for _, p := range []e2eProto{e2eProtos[0], grpc} {
+	h2 := e2eProto{
+		name: "vless-h2",
+		node: func(p int) *model.NodeSpec {
+			return &model.NodeSpec{Protocol: "vless", ListenIP: "127.0.0.1", ServerPort: p, Network: "h2",
+				NetworkSettings: map[string]any{"path": "/h"}, TLS: 1, ServerName: "test.local", CustomRoutes: e2eAllowLoopback}
+		},
+		outbound: func(p int, u string) string {
+			return fmt.Sprintf(`{"type":"vless","tag":"out","server":"127.0.0.1","server_port":%d,"uuid":%q,"tls":{"enabled":true,"server_name":"test.local","insecure":true},"transport":{"type":"http","path":"/h"}}`, p, u)
+		},
+	}
+	for _, p := range []e2eProto{e2eProtos[0], grpc, h2} {
 		t.Run(p.name, func(t *testing.T) {
 			src := startSource(t)
 			userA := model.UserSpec{ID: 1, UUID: e2eUUIDA}
