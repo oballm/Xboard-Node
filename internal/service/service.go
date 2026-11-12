@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cedar2025/xboard-node/internal/buildinfo"
 	"github.com/cedar2025/xboard-node/internal/cert"
 	"github.com/cedar2025/xboard-node/internal/cert/dnsproviders"
 	"github.com/cedar2025/xboard-node/internal/config"
@@ -1259,6 +1260,7 @@ func (s *Service) pushReportAsync() {
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernelRunning.Load()
+	s.addVersionMetrics(metrics)
 
 	go func() {
 		defer s.pushActive.Store(false)
@@ -1289,10 +1291,18 @@ func (s *Service) pushReportSync() {
 	status := monitor.Collect()
 	metrics := s.buildMetrics(status)
 	metrics["kernel_status"] = s.kernelRunning.Load()
+	s.addVersionMetrics(metrics)
 
 	if err := s.sink.Report(controlplane.ReportPayload{Traffic: traffic, Alive: aliveIPs, Online: online, CPU: status.CPU, Mem: [2]uint64{status.MemTotal, status.MemUsed}, Swap: [2]uint64{status.SwapTotal, status.SwapUsed}, Disk: [2]uint64{status.DiskTotal, status.DiskUsed}, Metrics: metrics}); err != nil {
 		nlog.Core().Warn("failed to push final report", "error", err)
 	}
+}
+
+// addVersionMetrics records the xboard-node version, for the panel to show
+// during rollouts; panels that don't know the key ignore it. Only the HTTP
+// report carries it: it is sent every push interval, WS or not.
+func (s *Service) addVersionMetrics(m map[string]interface{}) {
+	m["node_version"] = buildinfo.Version
 }
 
 // buildMetrics aggregates node-level metrics to be reported to the panel.

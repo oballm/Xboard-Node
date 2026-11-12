@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cedar2025/xboard-node/internal/buildinfo"
 	"github.com/cedar2025/xboard-node/internal/config"
 	"github.com/cedar2025/xboard-node/internal/lifecycle"
 	"github.com/cedar2025/xboard-node/internal/machine"
@@ -30,6 +31,8 @@ func main() {
 	configPath := flag.String("c", "config.yml", "config file path")
 	showVersion := flag.Bool("v", false, "show version")
 	flag.Parse()
+
+	buildinfo.Version = version
 
 	if *showVersion {
 		fmt.Printf("xboard-node %s (built %s)\n", version, buildTime)
