@@ -285,26 +285,40 @@ func TestE2EReloadFailingConfigRollsBack(t *testing.T) {
 	mustFlowAfterRestart(t, client, src, "after second rollback")
 }
 
-// A restart closes anytls sessions: a client's idle pooled session must not
-// stay attached to the stopped box, or every new stream on it fails at once
-// and the session never idles out (the client is stuck until it restarts).
-func TestE2ERestartClosesIdleAnyTLSSessions(t *testing.T) {
+// A restart closes connections a client keeps across requests (an anytls
+// session, the HTTP/2 connection under gRPC). Left open, they stay attached
+// to the stopped box: every new request on them fails at once and they never
+// idle out, so the client is stuck until it restarts.
+func TestE2ERestartClosesIdleSessions(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
-	p := e2eProtos[0]
-	src := startSource(t)
-	userA := model.UserSpec{ID: 1, UUID: e2eUUIDA}
-	s, port := startServer(t, p, []model.UserSpec{userA})
-	client := startClient(t, p.outbound(port, e2eUUIDA))
-	st := mustFlow(t, client, src, "before")
-	st.conn.Close() // leaves the session idle in the client's pool
-	time.Sleep(300 * time.Millisecond)
-
-	if err := s.Start(p.node(port), []model.UserSpec{userA}, selfSignedCert(t)); err != nil {
-		t.Fatal(err)
+	grpc := e2eProto{
+		name: "vless-grpc",
+		node: func(p int) *model.NodeSpec {
+			return &model.NodeSpec{Protocol: "vless", ListenIP: "127.0.0.1", ServerPort: p, Network: "grpc",
+				NetworkSettings: map[string]any{"serviceName": "g"}, TLS: 1, ServerName: "test.local", CustomRoutes: e2eAllowLoopback}
+		},
+		outbound: func(p int, u string) string {
+			return fmt.Sprintf(`{"type":"vless","tag":"out","server":"127.0.0.1","server_port":%d,"uuid":%q,"tls":{"enabled":true,"server_name":"test.local","insecure":true},"transport":{"type":"grpc","service_name":"g"}}`, p, u)
+		},
 	}
-	mustFlowAfterRestart(t, client, src, "after restart")
+	for _, p := range []e2eProto{e2eProtos[0], grpc} {
+		t.Run(p.name, func(t *testing.T) {
+			src := startSource(t)
+			userA := model.UserSpec{ID: 1, UUID: e2eUUIDA}
+			s, port := startServer(t, p, []model.UserSpec{userA})
+			client := startClient(t, p.outbound(port, e2eUUIDA))
+			st := mustFlow(t, client, src, "before")
+			st.conn.Close() // the client keeps the connection for the next request
+			time.Sleep(300 * time.Millisecond)
+
+			if err := s.Start(p.node(port), []model.UserSpec{userA}, selfSignedCert(t)); err != nil {
+				t.Fatal(err)
+			}
+			mustFlowAfterRestart(t, client, src, "after restart")
+		})
+	}
 }
 
 // Start on a running kernel restarts it on the same port.
