@@ -244,8 +244,9 @@ func TestE2EReloadOutboundChangeRestartsKernel(t *testing.T) {
 }
 
 // A config that only fails at start (a selector member that does not exist)
-// is reported, and the previous config is brought back up.
-func TestE2EReloadFailingConfigRollsBack(t *testing.T) {
+// leaves the kernel down: no rollback, so the panel sees kernel_status=false.
+// Pushing a working config starts it again.
+func TestE2EReloadFailingConfigStopsKernel(t *testing.T) {
 	if testing.Short() {
 		t.Skip("e2e")
 	}
@@ -268,23 +269,15 @@ func TestE2EReloadFailingConfigRollsBack(t *testing.T) {
 	if err := s.Reload(bad, []model.UserSpec{userA}, cert); err == nil {
 		t.Fatal("Reload accepted a selector with a missing member")
 	}
-	if s.box == nil {
-		t.Fatal("kernel left down after a failing config")
+	if s.IsRunning() {
+		t.Fatal("kernel still running after a config that fails to start")
 	}
-	if s.nodeConfig != good {
-		t.Fatal("kernel state does not point at the restored config")
-	}
-	mustFlowAfterRestart(t, client, src, "after rollback")
 
-	// The service falls back to Start with the same bad config; that must
-	// roll back too.
-	if err := s.Start(bad, []model.UserSpec{userA}, cert); err == nil {
-		t.Fatal("Start accepted the failing config")
+	// The fixed config arrives with the next push.
+	if err := s.Start(good, []model.UserSpec{userA}, cert); err != nil {
+		t.Fatalf("start with the fixed config: %v", err)
 	}
-	if s.box == nil {
-		t.Fatal("kernel left down after Start with a failing config")
-	}
-	mustFlowAfterRestart(t, client, src, "after second rollback")
+	mustFlowAfterRestart(t, client, src, "after the fixed config")
 }
 
 // A restart closes connections a client keeps across requests (an anytls

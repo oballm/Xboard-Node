@@ -127,24 +127,16 @@ func (s *SingBox) startLocked(nodeConfig *model.NodeSpec, users []model.UserSpec
 		return fmt.Errorf("create sing-box instance: %w", err)
 	}
 
-	// Some errors only show at start (e.g. a selector member that does not
-	// exist). The running box is already gone by then, so bring the last
-	// config back up rather than leave the node down.
-	running := s.box != nil
-	prevConfig, prevUsers, prevTLS := s.nodeConfig, s.users, s.tls
-
+	// Errors that only show at start (e.g. a selector member that does not
+	// exist) leave the kernel down, with no rollback to the previous config:
+	// the panel sees kernel_status=false, and once the config is fixed the
+	// next push starts it again. Same as `sing-box run` on SIGHUP: a config
+	// box.New rejects keeps the old instance, one that fails to start exits.
 	s.stop()
 
 	if err := instance.Start(); err != nil {
 		instance.Close()
 		cancel()
-		if running && prevConfig != nil {
-			if rbErr := s.startLocked(prevConfig, prevUsers, prevTLS); rbErr != nil {
-				nlog.Core().Error("sing-box: new config failed and the previous one did not come back", "error", err, "rollback_error", rbErr)
-			} else {
-				nlog.Core().Warn("sing-box: new config failed to start, previous config restored", "error", err)
-			}
-		}
 		return fmt.Errorf("start sing-box: %w", err)
 	}
 
