@@ -204,7 +204,7 @@ func (s *SingBox) Reload(nodeConfig *model.NodeSpec, users []model.UserSpec, tls
 
 // sameExceptUsersLocked reports whether nodeConfig and tls produce the same
 // sing-box config as the running one, ignoring users: both sides are built
-// with the current user list and compared as canonical sing-box JSON.
+// with the same placeholder user and compared as canonical sing-box JSON.
 func (s *SingBox) sameExceptUsersLocked(nodeConfig *model.NodeSpec, tls kernel.TLSCert) (bool, error) {
 	if s.nodeConfig == nil {
 		return false, nil
@@ -223,8 +223,14 @@ func (s *SingBox) sameExceptUsersLocked(nodeConfig *model.NodeSpec, tls kernel.T
 	return bytes.Equal(cur, next), nil
 }
 
+// compareUsers stands in for the user list when comparing configs. Users only
+// appear in the inbound's user list, so one fixed user gives the same answer
+// as the real list at a fraction of the cost (measured with 5000 users: 199ms
+// for the real list).
+var compareUsers = []model.UserSpec{{ID: 1, UUID: "00000000-0000-4000-8000-000000000001"}}
+
 func (s *SingBox) canonicalConfig(nodeConfig *model.NodeSpec, tls kernel.TLSCert) ([]byte, error) {
-	data, err := json.Marshal(buildConfig(s.cfg, nodeConfig, s.users, tls))
+	data, err := json.Marshal(buildConfig(s.cfg, nodeConfig, compareUsers, tls))
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
