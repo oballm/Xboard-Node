@@ -123,12 +123,24 @@ jobs:
         with:
           merge-multiple: true
           path: dist
+      # A branch build publishes under a rolling tag (dev, next-build). The
+      # release action creates a missing tag on the default branch and never
+      # moves an existing one, so the tag pointed at an old or unrelated
+      # commit while the assets came from this build. Move it here first.
+      - name: Move rolling tag to this commit
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        env:
+          ROLLING_TAG: ${{ github.ref == 'refs/heads/next' && 'next-build' || 'dev' }}
+        run: |
+          git tag -f "$ROLLING_TAG" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$ROLLING_TAG"
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
           # next publishes a prerelease under the tag next-build (not "next":
           # a tag named like the branch makes the ref ambiguous, as dev is).
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (github.ref == 'refs/heads/next' && 'next-build' || 'dev') }}
+          target_commitish: ${{ github.sha }}
           prerelease: ${{ github.ref == 'refs/heads/next' }}
           make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
           files: |
