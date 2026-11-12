@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/config"
+	"github.com/cedar2025/xboard-node/internal/lifecycle"
 	"github.com/cedar2025/xboard-node/internal/machine"
 	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/cedar2025/xboard-node/internal/service"
@@ -124,6 +125,15 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 					nlog.Core().Warn("received second signal, forcing exit", "signal", sig)
 					os.Exit(1)
 				case <-time.After(15 * time.Second):
+					// A panel-requested restart must still restart when the
+					// shutdown hangs (kernel stuck, final report can't reach
+					// the panel) — the hang is often why it was requested.
+					// Re-exec here instead of exiting, so it doesn't depend on
+					// systemd/Docker bringing the process back.
+					if lifecycle.RestartRequested() {
+						nlog.Core().Error("shutdown timed out after 15s, restarting anyway")
+						lifecycle.Restart()
+					}
 					nlog.Core().Error("shutdown timed out after 15s, forcing exit")
 					os.Exit(2)
 				}
@@ -215,6 +225,12 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 
 		if newRoot == nil {
 			close(errCh)
+			// A requested restart wins over shutdown errors: those are expected
+			// noise while services are being torn down on purpose.
+			if lifecycle.RestartRequested() {
+				nlog.Core().Info("stopped for restart")
+				lifecycle.Restart()
+			}
 			if err := <-errCh; err != nil {
 				os.Exit(1)
 			}
