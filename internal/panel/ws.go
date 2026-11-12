@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/cedar2025/xboard-node/internal/lifecycle"
 	"github.com/cedar2025/xboard-node/internal/nlog"
 	"github.com/gorilla/websocket"
 )
@@ -22,6 +23,9 @@ const (
 	WSEventSyncDevices   = "sync.devices"   // panel → node: global device state
 	WSEventSyncNodes     = "sync.nodes"     // panel → machine: node list changed
 	WSEventReportDevices = "report.devices" // node → panel: report device snapshot
+	// panel → node/machine: restart the whole xboard-node process. A payload
+	// with node_id (a per-node kernel restart) is not supported and ignored.
+	WSEventControlRestart = "control.restart"
 )
 
 // WSEvent is a parsed data event delivered to the service layer.
@@ -360,9 +364,40 @@ func (w *WSClient) handleMessage(msg wsMessage) {
 	case WSEventSyncNodes:
 		w.handleDataEvent(msg)
 
+	case WSEventControlRestart:
+		w.handleControlRestart(msg)
+
 	default:
 		nlog.Core().Debug("ws unknown event", "event", msg.Event)
 	}
+}
+
+// handleControlRestart runs on the read goroutine. The restart is triggered
+// right here rather than queued to the service loop, so it still works when
+// that loop is wedged.
+func (w *WSClient) handleControlRestart(msg wsMessage) {
+	var p struct {
+		NodeID int `json:"node_id"`
+	}
+	if len(msg.Data) > 0 {
+		var raw map[string]interface{}
+		if err := json.Unmarshal(msg.Data, &raw); err != nil {
+			nlog.Core().Warn("ws: cannot decode control.restart payload", "error", err)
+			return
+		}
+		if err := decodeWeakRaw(raw, &p); err != nil {
+			nlog.Core().Warn("ws: cannot decode control.restart payload", "error", err)
+			return
+		}
+	}
+	if p.NodeID != 0 {
+		// Kernel-only restart of one node is deliberately not implemented: a
+		// process restart covers it, and the in-process path has no retry on a
+		// failed start and no panic guard.
+		nlog.Core().Warn("ws: control.restart for a single node is not supported, ignoring", "node_id", p.NodeID)
+		return
+	}
+	lifecycle.RequestRestart("panel control.restart")
 }
 
 func (w *WSClient) handleDataEvent(msg wsMessage) {
