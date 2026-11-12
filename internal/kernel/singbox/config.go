@@ -61,20 +61,68 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	// Merge panel routes and static config routes
 	cfg["route"] = buildRoutes(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute))
 
-	// Automatically enable rule_set caching (cache_file) when panel routes
-	// reference geoip:/geosite: entries so that the downloaded .srs rule_set
-	// files survive across process restarts.
-	if kernel.NeedsGeoIP(nc.Routes) || kernel.NeedsGeoSite(nc.Routes) || kernel.NeedsGeoIPRules(nc.CustomRouteRules) || kernel.NeedsGeoSiteRules(nc.CustomRouteRules) {
-		cfg["experimental"] = M{
-			"cache_file": M{
-				"enabled": true,
-				"path":    filepath.Join(kcfg.ConfigDir, "cache.db"),
-			},
+	mergeCustomSingbox(cfg, kcfg, nc.CustomConfig)
+	ensureRuleSetCache(cfg, kcfg)
+	return cfg
+}
+
+// ensureRuleSetCache enables cache_file when the final config has a remote
+// rule-set, so a restart loads rule-sets from the cache instead of
+// downloading every one again: without a cache, a rule-set that cannot be
+// downloaded (source unreachable) fails the start and the kernel stays down.
+//
+// It looks at the final config, after custom_config is merged in, because
+// that is where the panel delivers route.rule_set. The path is per node
+// (<config_dir>/cache.db): the panel cannot know it, and nodes sharing a
+// file block each other on its lock. A cache_file the config already has
+// (set in custom_config) is left as it is.
+//
+// This replaced a check for geoip:/geosite: route entries, which sing-box
+// no longer supports (removed in 1.12): such entries compile to literal
+// domain matches and need no cache.
+func ensureRuleSetCache(cfg M, kcfg config.KernelConfig) {
+	if !hasRemoteRuleSet(cfg["route"]) {
+		return
+	}
+	exp, _ := asMap(cfg["experimental"])
+	if exp == nil {
+		exp = M{}
+	}
+	if _, has := exp["cache_file"]; has {
+		return
+	}
+	exp["cache_file"] = M{
+		"enabled": true,
+		"path":    filepath.Join(kcfg.ConfigDir, "cache.db"),
+	}
+	cfg["experimental"] = exp
+}
+
+func hasRemoteRuleSet(route any) bool {
+	r, ok := asMap(route)
+	if !ok {
+		return false
+	}
+	var sets []any
+	switch v := r["rule_set"].(type) {
+	case []any:
+		sets = v
+	case []M:
+		for _, m := range v {
+			sets = append(sets, m)
 		}
 	}
+	for _, s := range sets {
+		if m, ok := asMap(s); ok && m["type"] == "remote" {
+			return true
+		}
+	}
+	return false
+}
 
-	mergeCustomSingbox(cfg, kcfg, nc.CustomConfig)
-	return cfg
+func asMap(v any) (M, bool) {
+	m, ok := v.(M)
+	return m, ok
 }
 
 // outboundConfigToSingbox converts a structured OutboundConfig (from the panel)
