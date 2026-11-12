@@ -24,7 +24,7 @@ build-all: build-linux build-linux-arm64
 
 # Run tests
 test:
-	go test -v -race -count=1 ./internal/...
+	go test -v -race -count=1 -tags "with_quic with_utls with_wireguard with_clash_api" ./internal/...
 
 # Clean build artifacts
 clean:
