@@ -9,7 +9,12 @@ services:
     network_mode: host
     restart: unless-stopped
     volumes:
+      # Config, TLS certificates and kernel cache. Keep it: without it every
+      # container recreate requests new certificates.
       - ./config:/etc/xboard-node
+      # Versions installed by a panel-requested upgrade (XBOARD_NODE_UPDATE_DIR
+      # in the image). Without a volume here, such upgrades are refused.
+      - xboard-node-update:/var/lib/xboard-node
     command: ["-c", "/etc/xboard-node/config.yml"]
     logging:
       driver: json-file
@@ -22,3 +27,6 @@ services:
     #   API_KEY: your-server-token
     #   NODE_ID: "1"
     #   KERNEL_TYPE: singbox
+
+volumes:
+  xboard-node-update: {}

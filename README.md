@@ -12,7 +12,7 @@ docker compose up -d
 ## Update / logs / stop
 
 ```bash
-cd compose
+cd Xboard-Node
 docker compose pull && docker compose up -d
 docker compose logs -f
 docker compose down
@@ -26,6 +26,13 @@ docker compose down
 | `config/config.yml.example` | Template (safe to commit) |
 | `config/config.yml` | Your secrets (**do not commit**; add to `.gitignore` upstream) |
 | `.env.example` | Optional env overrides |
+| `xboard-node-update` (named volume) | Versions installed by a panel-requested upgrade; without it such upgrades are refused |
+
+`./config` also holds the TLS certificates and the kernel cache. Keep it
+mounted: otherwise every container recreate (`docker compose pull && up -d`,
+changed options) requests new certificates, and Let's Encrypt allows only 5 per
+domain per week. `docker compose down` keeps both (it removes named volumes
+only with `-v`).
 
 ## Host network
 
