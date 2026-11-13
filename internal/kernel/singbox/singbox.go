@@ -84,7 +84,7 @@ func (s *SingBox) Capabilities() kernel.Capabilities {
 func (s *SingBox) Protocols() []string {
 	return []string{
 		"vmess", "vless", "trojan", "shadowsocks",
-		"hysteria", "hysteria2", "tuic", "naive", "socks", "http", "anytls", "mieru",
+		"hysteria", "hysteria2", "tuic", "naive", "socks", "http", "anytls", "mieru", "snell",
 	}
 }
 
@@ -498,6 +498,10 @@ func (s *SingBox) reloadInboundsLocked(users []model.UserSpec) error {
 			}
 		case adapter.UpdatableInbound[option.MieruUser]:
 			if opts, ok := inb.Options.(*option.MieruInboundOptions); ok {
+				err, updated = v.UpdateUsers(opts.Users), true
+			}
+		case adapter.UpdatableInbound[option.SnellUser]:
+			if opts, ok := inb.Options.(*option.SnellInboundOptions); ok {
 				err, updated = v.UpdateUsers(opts.Users), true
 			}
 		case adapter.UpdatableInbound[auth.User]:

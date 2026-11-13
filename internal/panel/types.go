@@ -144,6 +144,13 @@ type NodeConfig struct {
 	Transport      string `json:"transport,omitempty"`
 	TrafficPattern string `json:"traffic_pattern,omitempty"`
 
+	// Snell (not an Xboard protocol; panel-proxy extension). The node-wide
+	// PSK is server_key, the version is version (5 or 6, default 5), the v5
+	// obfuscation is obfs (none/http/tls); snell_mode is the v6 mode
+	// (default/unshaped/unsafe-raw). Each user logs in with its UUID as
+	// userkey.
+	SnellMode string `json:"snell_mode,omitempty"`
+
 	// Multiplex
 	Multiplex *MultiplexConfig `json:"multiplex,omitempty"`
 

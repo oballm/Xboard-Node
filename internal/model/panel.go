@@ -121,6 +121,7 @@ func NodeSpecFromPanel(nc *panel.NodeConfig) *NodeSpec {
 		PaddingScheme:       string(nc.PaddingScheme),
 		Transport:           nc.Transport,
 		TrafficPattern:      nc.TrafficPattern,
+		SnellMode:           nc.SnellMode,
 		Multiplex:           multiplex,
 		AcceptProxyProtocol: nc.AcceptProxyProtocol,
 	}
@@ -261,6 +262,7 @@ func (n *NodeSpec) ToPanel() *panel.NodeConfig {
 		PaddingScheme:       panel.StringOrArray(n.PaddingScheme),
 		Transport:           n.Transport,
 		TrafficPattern:      n.TrafficPattern,
+		SnellMode:           n.SnellMode,
 		Multiplex:           multiplex,
 		AcceptProxyProtocol: n.AcceptProxyProtocol,
 	}

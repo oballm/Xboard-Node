@@ -46,6 +46,7 @@ type StandaloneNodeConfig struct {
 	PaddingScheme     string `yaml:"padding_scheme,omitempty"`
 	Transport         string `yaml:"transport,omitempty"`
 	TrafficPattern    string `yaml:"traffic_pattern,omitempty"`
+	SnellMode         string `yaml:"snell_mode,omitempty"`
 
 	Multiplex           *StandaloneMultiplexConfig `yaml:"multiplex,omitempty"`
 	AcceptProxyProtocol bool                       `yaml:"accept_proxy_protocol,omitempty"`

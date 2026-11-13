@@ -524,6 +524,8 @@ func buildInbound(nc *model.NodeSpec, users []model.UserSpec, tc kernel.TLSCert)
 		return buildHTTP(base, nc, users, tc)
 	case "mieru":
 		return buildMieru(base, nc, users)
+	case "snell":
+		return buildSnell(base, nc, users)
 	default:
 		return nil
 	}
@@ -543,6 +545,40 @@ func buildMieru(base M, nc *model.NodeSpec, users []model.UserSpec) M {
 		userList = append(userList, M{
 			"name":     u.UUID,
 			"password": u.UUID,
+		})
+	}
+	base["users"] = userList
+	return base
+}
+
+// buildSnell builds a multi-user snell inbound: the node-wide PSK is
+// server_key and each user logs in with its UUID as userkey (the client
+// sends it as the client ID). Version 5 (default) takes the v5 obfuscation
+// from obfs; version 6 takes its mode from snell_mode. Snell clients pair
+// version 4 with a v5 server.
+func buildSnell(base M, nc *model.NodeSpec, users []model.UserSpec) M {
+	base["type"] = "snell"
+	version := nc.Version
+	if version == 0 {
+		version = 5
+	}
+	base["version"] = version
+	base["psk"] = nc.ServerKey
+	switch version {
+	case 5:
+		if nc.Obfs != "" {
+			base["obfs_mode"] = nc.Obfs
+		}
+	case 6:
+		if nc.SnellMode != "" {
+			base["mode"] = nc.SnellMode
+		}
+	}
+	userList := make([]M, 0, len(users))
+	for _, u := range users {
+		userList = append(userList, M{
+			"name":    u.UUID,
+			"userkey": u.UUID,
 		})
 	}
 	base["users"] = userList

@@ -93,7 +93,7 @@ require (
 	github.com/dgryski/go-metro v0.0.0-20180109044635-280f6062b5bc // indirect
 	github.com/digitalocean/godo v1.148.0 // indirect
 	github.com/ebitengine/purego v0.10.0 // indirect
-	github.com/enfein/mieru/v3 v3.29.0 // indirect
+	github.com/enfein/mieru/v3 v3.39.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/florianl/go-nfqueue/v2 v2.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
@@ -296,6 +296,10 @@ require (
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )
 
-replace github.com/sagernet/sing-box => github.com/oballm/sing-box v1.14.5-0.20261112085818-4cc93c971f11
+replace github.com/sagernet/sing-box => ../sb-1.14.4
+
+replace github.com/enfein/mieru/v3 => ../mieru
+
+replace github.com/sagernet/sing-snell => ../sing-snell
 
 replace github.com/xtls/xray-core => github.com/oballm/Xray-core v0.0.0-20261111073346-9e83c5574025
