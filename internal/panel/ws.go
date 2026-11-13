@@ -12,6 +12,7 @@ import (
 
 	"github.com/cedar2025/xboard-node/internal/lifecycle"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/selfupdate"
 	"github.com/gorilla/websocket"
 )
 
@@ -26,6 +27,9 @@ const (
 	// panel → node/machine: restart the whole xboard-node process. A payload
 	// with node_id (a per-node kernel restart) is not supported and ignored.
 	WSEventControlRestart = "control.restart"
+	// WSEventControlUpgrade asks the process to install a release and
+	// restart into it. Data: {"version": "v1.15"}.
+	WSEventControlUpgrade = "control.upgrade"
 )
 
 // WSEvent is a parsed data event delivered to the service layer.
@@ -367,6 +371,9 @@ func (w *WSClient) handleMessage(msg wsMessage) {
 	case WSEventControlRestart:
 		w.handleControlRestart(msg)
 
+	case WSEventControlUpgrade:
+		w.handleControlUpgrade(msg)
+
 	default:
 		nlog.Core().Debug("ws unknown event", "event", msg.Event)
 	}
@@ -398,6 +405,43 @@ func (w *WSClient) handleControlRestart(msg wsMessage) {
 		return
 	}
 	lifecycle.RequestRestart("panel control.restart")
+}
+
+// handleControlUpgrade downloads in the background (it takes a while and must
+// not stall the read loop), then restarts the whole process into the new
+// version. Only one upgrade runs at a time; the release source is fixed in
+// the binary, the panel only picks the version.
+func (w *WSClient) handleControlUpgrade(msg wsMessage) {
+	var p struct {
+		Version string `json:"version"`
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(msg.Data, &raw); err != nil {
+		nlog.Core().Warn("ws: cannot decode control.upgrade payload", "error", err)
+		return
+	}
+	if err := decodeWeakRaw(raw, &p); err != nil || p.Version == "" {
+		nlog.Core().Warn("ws: control.upgrade without a version, ignoring", "error", err)
+		return
+	}
+	if lifecycle.WithinGrace() {
+		nlog.Core().Warn("ws: control.upgrade ignored: process just started", "version", p.Version)
+		return
+	}
+	go func() {
+		// Bounds the whole upgrade; a stalled download fails much sooner.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		nlog.Core().Info("upgrade requested by panel", "version", p.Version)
+		rel, err := selfupdate.Upgrade(ctx, p.Version)
+		if err != nil {
+			nlog.Core().Error("upgrade failed", "version", p.Version, "error", err)
+			return
+		}
+		if !lifecycle.RequestRestart("upgrade to " + rel.Tag) {
+			nlog.Core().Warn("upgrade installed; it takes effect on the next restart", "version", rel.Tag)
+		}
+	}()
 }
 
 func (w *WSClient) handleDataEvent(msg wsMessage) {

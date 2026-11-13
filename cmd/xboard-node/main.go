@@ -19,6 +19,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/lifecycle"
 	"github.com/cedar2025/xboard-node/internal/machine"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/selfupdate"
 	"github.com/cedar2025/xboard-node/internal/service"
 )
 
@@ -35,9 +36,17 @@ func main() {
 	buildinfo.Version = version
 
 	if *showVersion {
+		// The first line is parsed by the self-upgrade (version check of a
+		// downloaded binary): keep its format.
 		fmt.Printf("xboard-node %s (built %s)\n", version, buildTime)
+		if note := selfupdate.DescribeInstalled(); note != "" {
+			fmt.Println(note)
+		}
 		os.Exit(0)
 	}
+
+	// Before anything else: may exec an installed upgrade or roll one back.
+	selfupdate.Launch(version)
 
 	rootCfg, err := config.LoadRoot(*configPath)
 	if err != nil {
@@ -54,6 +63,15 @@ func main() {
 
 	// Apply runtime memory tuning before anything else allocates.
 	applyRuntimeConfig(instances[0].Runtime)
+
+	// A new version on trial confirms itself once healthy, or restarts so the
+	// launcher rolls it back.
+	selfupdate.Watch(func(reason string) {
+		// A restart already under way lands in the launcher too.
+		if !lifecycle.RequestRestart("rollback: "+reason) && !lifecycle.RestartRequested() {
+			lifecycle.Restart()
+		}
+	})
 
 	runWithReload(rootCfg, *configPath)
 }
@@ -238,6 +256,7 @@ func runWithReload(initialRoot *config.RootConfig, configPath string) {
 				os.Exit(1)
 			}
 			nlog.Core().Info("stopped")
+			selfupdate.NoteCleanExit()
 			return
 		}
 

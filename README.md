@@ -17,10 +17,24 @@ Node backend for [Xboard](https://github.com/cedar2025/Xboard). Supports `sing-b
 ### Docker
 
 ```bash
-docker run -d --restart=always --network=host \
+docker run -d --name xboard-node --restart=always --network=host \
+  -v /etc/xboard-node:/etc/xboard-node \
+  -v xboard-node-update:/var/lib/xboard-node \
   -e apiHost=https://panel.com -e apiKey=TOKEN -e nodeID=1 \
   ghcr.io/oballm/xboard-node:latest
 ```
+
+Both mounts matter:
+
+- `/etc/xboard-node` holds the config (if any), the TLS certificates and the
+  kernel cache. Without it they live inside the container and are lost every
+  time the container is recreated (new image, changed options): each node then
+  requests new certificates, and Let's Encrypt allows only 5 per domain per
+  week. Restarts (`docker restart`, panel restart, panel upgrade) keep them.
+- `xboard-node-update` holds versions installed by a panel-requested upgrade
+  (`control.upgrade`). Without a volume there, such upgrades are refused.
+  Pulling a new image and recreating the container always wins over an
+  installed upgrade.
 
 ### Docker Compose
 

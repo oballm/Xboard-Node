@@ -136,6 +136,9 @@ jobs:
         run: |
           git tag -f "$ROLLING_TAG" "$GITHUB_SHA"
           git push -f origin "refs/tags/$ROLLING_TAG"
+      # Nodes verify panel-requested upgrades against this file.
+      - name: Checksums
+        run: cd dist && sha256sum xboard-node-linux-* xbctl-linux-* > SHA256SUMS && cat SHA256SUMS
       - name: Release
         uses: softprops/action-gh-release@v2
         with:
@@ -143,10 +146,13 @@ jobs:
           # a tag named like the branch makes the ref ambiguous, as dev is).
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || (github.ref == 'refs/heads/next' && 'next-build' || 'dev') }}
           target_commitish: ${{ github.sha }}
-          prerelease: ${{ github.ref == 'refs/heads/next' }}
-          make_latest: ${{ startsWith(github.ref, 'refs/tags/') }}
+          # next-build and tags like v1.14.0-rc.1 are pre-releases; only a
+          # plain vX.Y.Z tag becomes "latest".
+          prerelease: ${{ github.ref == 'refs/heads/next' || (startsWith(github.ref, 'refs/tags/') && contains(github.ref_name, '-')) }}
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
           files: |
             dist/xboard-node-linux-amd64
             dist/xboard-node-linux-arm64
             dist/xbctl-linux-amd64
             dist/xbctl-linux-arm64
+            dist/SHA256SUMS

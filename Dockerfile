@@ -23,7 +23,12 @@ RUN apk add --no-cache ca-certificates tzdata
 
 COPY --from=builder /build/xboard-node /usr/local/bin/xboard-node
 
-RUN mkdir -p /etc/xboard-node
+RUN mkdir -p /etc/xboard-node /var/lib/xboard-node
+
+# Panel-requested upgrades are installed here, and this image's binary starts
+# them. Mount a volume at this path (see README); without one, upgrades are
+# refused, since they would be lost when the container is recreated.
+ENV XBOARD_NODE_UPDATE_DIR=/var/lib/xboard-node
 
 WORKDIR /etc/xboard-node
 

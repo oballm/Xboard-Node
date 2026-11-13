@@ -30,6 +30,7 @@ const (
 	serviceName            = "xboard-node.service"
 	serviceFilePath        = "/etc/systemd/system/xboard-node.service"
 	defaultInstallRoot     = "/etc/xboard-node"
+	defaultUpdateDir       = "/var/lib/xboard-node" // panel-requested upgrades
 	downloadBase           = "https://github.com/oballm/Xboard-Node/releases"
 )
 
@@ -563,6 +564,9 @@ func runUninstall(args []string) error {
 	}
 
 	if purge {
+		if err := os.RemoveAll(defaultUpdateDir); err != nil {
+			warnings = append(warnings, fmt.Sprintf("remove %s: %v", defaultUpdateDir, err))
+		}
 		if err := os.RemoveAll(defaultInstallRoot); err != nil {
 			warnings = append(warnings, fmt.Sprintf("remove %s: %v", defaultInstallRoot, err))
 		} else {
@@ -1165,6 +1169,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=%s
 EnvironmentFile=-%s
+# Panel-requested upgrades live here (see internal/selfupdate).
+StateDirectory=xboard-node
+Environment=XBOARD_NODE_UPDATE_DIR=/var/lib/xboard-node
 ExecStart=%s -c %s
 Restart=always
 RestartSec=5

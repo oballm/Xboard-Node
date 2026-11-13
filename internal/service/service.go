@@ -26,6 +26,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/monitor"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/selfupdate"
 	"github.com/cedar2025/xboard-node/internal/tracker"
 )
 
@@ -251,7 +252,20 @@ func protocolsForKernelType(kernelType string) []string {
 	return newKernelByType(config.KernelConfig{Type: kernelType}, kernelType).Protocols()
 }
 
-func (s *Service) Run(ctx context.Context) error {
+func (s *Service) Run(ctx context.Context) (err error) {
+	// A new version on trial is confirmed only once every reporting node has
+	// reported to the panel; a node that exits with an error fails the trial.
+	if s.sink.SupportsReporting() {
+		selfupdate.NodeStarted(s.healthID())
+		defer func() {
+			if err != nil && ctx.Err() == nil {
+				selfupdate.NodeFailed(s.healthID(), err)
+			} else {
+				selfupdate.NodeStopped(s.healthID())
+			}
+		}()
+	}
+
 	// Start cert manager (handles auto-TLS or manual cert verification)
 	if err := s.cert.Start(ctx); err != nil {
 		return fmt.Errorf("cert manager: %w", err)
@@ -531,6 +545,9 @@ func (s *Service) wsMetrics() map[string]interface{} {
 	status := monitor.Collect()
 	m := s.buildMetrics(status)
 	m["kernel_status"] = s.kernelRunning.Load()
+	// Also on WS, so the panel sees the version and upgrade progress (download,
+	// trial, result) without waiting for the next HTTP report.
+	s.addVersionMetrics(m)
 	return m
 }
 
@@ -1276,6 +1293,7 @@ func (s *Service) pushReportAsync() {
 			return
 		}
 		s.pushBackoff.onSuccess()
+		selfupdate.NodeReported(s.healthID())
 		nlog.ReportPushed(len(traffic), len(online))
 	}()
 }
@@ -1298,11 +1316,17 @@ func (s *Service) pushReportSync() {
 	}
 }
 
-// addVersionMetrics records the xboard-node version, for the panel to show
-// during rollouts; panels that don't know the key ignore it. Only the HTTP
-// report carries it: it is sent every push interval, WS or not.
+// addVersionMetrics records the xboard-node version and upgrade state, for the
+// panel to show during rollouts; panels that don't know the keys ignore them.
+// Sent with the HTTP report and the WS node.status.
 func (s *Service) addVersionMetrics(m map[string]interface{}) {
 	m["node_version"] = buildinfo.Version
+	m["upgrade"] = selfupdate.CurrentStatus()
+}
+
+// healthID names this node in the self-upgrade health check.
+func (s *Service) healthID() string {
+	return fmt.Sprintf("node %d (%s)", s.cfg.Panel.NodeID, s.cfg.InstanceID)
 }
 
 // buildMetrics aggregates node-level metrics to be reported to the panel.

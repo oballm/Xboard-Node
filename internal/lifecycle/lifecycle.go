@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/selfupdate"
 )
 
 // RestartExitCode is EX_TEMPFAIL: "try again later".
@@ -35,14 +36,22 @@ var (
 	// os.Executable strips Linux's " (deleted)" suffix, so after an on-disk
 	// upgrade this runs the new binary. Go opens every fd close-on-exec, so
 	// listen sockets and file locks are released by the exec itself.
+	// A version started by the self-upgrade launcher restarts through it, so
+	// the launcher decides what runs next (and can roll back).
 	execSelf = func() error {
-		exe, err := os.Executable()
-		if err != nil {
-			return err
+		exe := selfupdate.RestartTarget()
+		if exe == "" {
+			var err error
+			if exe, err = os.Executable(); err != nil {
+				return err
+			}
 		}
-		return syscall.Exec(exe, os.Args, os.Environ())
+		return syscall.Exec(exe, append([]string{exe}, os.Args[1:]...), os.Environ())
 	}
 )
+
+// WithinGrace reports whether the process started too recently to restart.
+func WithinGrace() bool { return time.Since(startedAt) < RestartGrace }
 
 // RequestRestart starts a graceful shutdown that ends in RestartExitCode.
 // It returns immediately; the shutdown runs on the signal handler in main.
@@ -72,6 +81,8 @@ func RequestRestart(reason string) bool {
 // main calls it once the graceful shutdown requested by RequestRestart is done.
 func Restart() {
 	nlog.Core().Info("restarting process in place (re-exec)")
+	// A planned restart is not a failed start of a version on trial.
+	selfupdate.NoteCleanExit()
 	if err := execSelf(); err != nil {
 		nlog.Core().Error("re-exec failed, exiting for the service manager to restart", "error", err, "exit_code", RestartExitCode)
 	}

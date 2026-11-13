@@ -193,7 +193,7 @@ usage() {
     --gomemlimit        Runtime GOMEMLIMIT value, e.g. 256MiB
     --gogc              Runtime GOGC value, e.g. 50
     --force-reconfigure Overwrite an existing install even if mode/target changed
-    --purge             With uninstall, delete /etc/xboard-node too
+    --purge             With uninstall, delete /etc/xboard-node and /var/lib/xboard-node too
     --yes, -y           Non-interactive confirmation for destructive operations
 
   EXAMPLES:
@@ -600,6 +600,9 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=${INSTALL_ROOT}
 EnvironmentFile=-${CREDENTIALS_FILE}
+# Panel-requested upgrades live here (see internal/selfupdate).
+StateDirectory=xboard-node
+Environment=XBOARD_NODE_UPDATE_DIR=/var/lib/xboard-node
 ExecStart=${BINARY_PATH} -c ${CONFIG_FILE}
 Restart=always
 RestartSec=5
@@ -777,7 +780,7 @@ perform_uninstall() {
     rm -f "$CLI_PATH"
     rm -f /usr/bin/xbctl 2>/dev/null || true
     if [ "$PURGE" -eq 1 ]; then
-        rm -rf "$INSTALL_ROOT"
+        rm -rf "$INSTALL_ROOT" /var/lib/xboard-node
         log_info "Removed ${INSTALL_ROOT}"
     else
         rm -f "$INSTALL_META"
