@@ -61,7 +61,7 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	// Merge panel routes and static config routes
 	cfg["route"] = buildRoutes(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute))
 
-	mergeCustomSingbox(cfg, kcfg, nc.CustomConfig)
+	mergeCustomSingbox(cfg, kcfg, kernel.WireCustomConfig(nc, model.KernelSingBox))
 	ensureRuleSetCache(cfg, kcfg)
 	return cfg
 }

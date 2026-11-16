@@ -80,7 +80,7 @@ func buildConfig(kcfg config.KernelConfig, nc *model.NodeSpec, users []model.Use
 	// Merge panel routes and static config routes
 	cfg["routing"] = buildRouting(nc.Routes, nc.CustomRouteRules, mergeRouteList(nc.CustomRoutes, kcfg.CustomRoute))
 
-	mergeCustomXray(cfg, kcfg)
+	mergeCustomXray(cfg, kcfg, kernel.WireCustomConfig(nc, model.KernelXray))
 	return cfg
 }
 
@@ -108,18 +108,24 @@ func mergeRouteList(a, b []map[string]any) []map[string]any {
 	return res
 }
 
-// mergeCustomXray deep-merges a custom Xray config file into the generated config.
-// Merge strategy (compatible with V2bX/XrayR custom DNS etc.):
-//   - dns: custom replaces auto-generated
-//   - outbounds: custom entries appended
-//   - routing.rules: custom rules prepended (matched first)
-//   - policy, api: custom deep-merges
-//   - inbounds: NOT merged (panel-managed, authoritative)
-func mergeCustomXray(cfg M, kcfg config.KernelConfig) {
-	custom, err := kernel.LoadCustomConfig(kcfg.CustomConfig)
-	if err != nil {
-		nlog.Core().Error("failed to load custom xray config", "error", err)
-		return
+// mergeCustomXray deep-merges custom Xray config into the generated config:
+// the panel-delivered custom_config (wireCustom, already checked to be xray
+// dialect by kernel.WireCustomConfig) when present, else the local
+// kernel.custom_config file — the same precedence as sing-box. Before, xray
+// read only the local file, so panel DNS-library entries for xray nodes were
+// accepted by the panel and silently ignored by the node.
+func mergeCustomXray(cfg M, kcfg config.KernelConfig, wireCustom map[string]any) {
+	var custom map[string]any
+	if len(wireCustom) > 0 {
+		custom = wireCustom
+		nlog.Core().Debug("merging custom xray config from panel wire")
+	} else {
+		var err error
+		custom, err = kernel.LoadCustomConfig(kcfg.CustomConfig)
+		if err != nil {
+			nlog.Core().Error("failed to load custom xray config", "error", err)
+			return
+		}
 	}
 	if custom == nil {
 		return

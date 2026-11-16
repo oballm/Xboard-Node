@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/nlog"
 	"gopkg.in/yaml.v3"
 )
@@ -107,4 +108,33 @@ func mapKeys(m map[string]any) []string {
 		keys = append(keys, k)
 	}
 	return keys
+}
+
+// WireCustomConfig returns the panel-delivered custom_config to merge into a
+// kernel's generated config, or nil when it must not be used.
+//
+// custom_config is raw kernel-native config (DNS, rule-sets, experimental,
+// ...) that the panel writes for the kernel named by the node's kernel_type —
+// panel-proxy treats an empty kernel_type as sing-box. Merging one kernel's
+// dialect into the other breaks the kernel (sing-box rejects xray's "dns"
+// shape and vice versa), so the wire config is used only when its dialect
+// matches the kernel actually running. With kernel.type=auto the node follows
+// the panel's kernel_type and they always match; a mismatch means the local
+// config pins a different kernel than the panel, and the wire config is
+// skipped with a warning (the local custom_config file still applies).
+func WireCustomConfig(nc *model.NodeSpec, running string) map[string]any {
+	if nc == nil || len(nc.CustomConfig) == 0 {
+		return nil
+	}
+	dialect := strings.ToLower(strings.TrimSpace(nc.KernelType))
+	switch dialect {
+	case "", "sing-box":
+		dialect = model.KernelSingBox
+	}
+	if dialect != running {
+		nlog.Core().Warn("ignoring the panel's custom_config: it is written for another kernel",
+			"panel_kernel_type", dialect, "running_kernel", running)
+		return nil
+	}
+	return nc.CustomConfig
 }
