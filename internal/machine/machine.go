@@ -134,9 +134,10 @@ func (o *Orchestrator) startNode(ctx context.Context, mn panel.MachineNode) {
 
 	perNodeClient := o.client.ForNode(mn.ID)
 
-	// Kernel selection (incl. "auto" → xray for xhttp/splithttp) is handled by
-	// the node Service from the transport in its first config snapshot, so the
-	// orchestrator passes the configured kernel.type through unchanged.
+	// Kernel selection is handled by the node Service from its first config
+	// snapshot (model.SelectKernel: local kernel.type, else the panel's
+	// kernel_type, else the transport), so the orchestrator passes the
+	// configured kernel.type through unchanged.
 
 	var push controlplane.PushClient
 	if o.ws != nil {

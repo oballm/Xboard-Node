@@ -1,6 +1,10 @@
 package model
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/cedar2025/xboard-node/internal/config"
+)
 
 func TestResolveEffectiveKernel(t *testing.T) {
 	cases := []struct {
@@ -60,5 +64,59 @@ func TestValidateTransportKernel(t *testing.T) {
 	// sing-box serves everything else
 	if err := ValidateTransportKernel("tcp", KernelSingBox); err != nil {
 		t.Errorf("ValidateTransportKernel(tcp, singbox) unexpected error: %v", err)
+	}
+}
+
+func TestSelectKernel(t *testing.T) {
+	cases := []struct {
+		name, configured, panel, network string
+		want, source                     string
+		wantErr                          bool
+	}{
+		// Local singbox/xray always wins, whatever the panel says.
+		{"local singbox ignores panel", "singbox", "xray", "tcp", KernelSingBox, KernelSourceLocal, false},
+		{"local xray ignores panel", "xray", "singbox", "ws", KernelXray, KernelSourceLocal, false},
+		{"local sing-box spelling", "sing-box", "", "tcp", KernelSingBox, KernelSourceLocal, false},
+		// auto follows the panel — including the node 111 case (REALITY/TCP, panel xray).
+		{"auto follows panel xray on tcp", "auto", "xray", "tcp", KernelXray, KernelSourcePanel, false},
+		{"auto follows panel singbox on ws", "auto", "singbox", "ws", KernelSingBox, KernelSourcePanel, false},
+		{"auto follows panel xray on xhttp", "auto", "xray", "xhttp", KernelXray, KernelSourcePanel, false},
+		// No fallback: the panel's choice is returned even if it can't serve the
+		// transport; ValidateTransportKernel rejects it afterwards.
+		{"auto panel singbox on xhttp not overridden", "auto", "singbox", "xhttp", KernelSingBox, KernelSourcePanel, false},
+		// No kernel_type from the panel (Xboard / old panel) → transport rule.
+		{"auto no panel tcp", "auto", "", "tcp", KernelSingBox, KernelSourceTransport, false},
+		{"auto no panel xhttp", "auto", "", "xhttp", KernelXray, KernelSourceTransport, false},
+		{"auto panel says auto", "auto", "auto", "splithttp", KernelXray, KernelSourceTransport, false},
+		{"empty configured is auto", "", "xray", "tcp", KernelXray, KernelSourcePanel, false},
+		// Bad values are errors, not silently ignored.
+		{"bad panel value", "auto", "v2ray", "tcp", "", "", true},
+		{"bad local value", "clash", "", "tcp", "", "", true},
+	}
+	for _, c := range cases {
+		got, source, err := SelectKernel(c.configured, c.panel, c.network)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("%s: want error, got %q/%q", c.name, got, source)
+			}
+			continue
+		}
+		if err != nil || got != c.want || source != c.source {
+			t.Errorf("%s: SelectKernel(%q,%q,%q) = %q,%q,%v; want %q,%q", c.name,
+				c.configured, c.panel, c.network, got, source, err, c.want, c.source)
+		}
+	}
+}
+
+func TestValidateNodeSpecUsesPanelKernel(t *testing.T) {
+	// auto + panel singbox on xhttp must be rejected, not silently moved to xray.
+	spec := &NodeSpec{Protocol: "vless", Network: "xhttp", KernelType: "singbox"}
+	if err := ValidateNodeSpec(spec, config.KernelConfig{Type: KernelAuto}); err == nil {
+		t.Fatal("auto + panel singbox + xhttp: want error")
+	}
+	// auto + panel xray on tcp is valid (xray serves tcp).
+	spec = &NodeSpec{Protocol: "vless", Network: "tcp", KernelType: "xray"}
+	if err := ValidateNodeSpec(spec, config.KernelConfig{Type: KernelAuto}); err != nil {
+		t.Fatalf("auto + panel xray + tcp: %v", err)
 	}
 }

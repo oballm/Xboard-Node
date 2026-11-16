@@ -8,31 +8,66 @@ import (
 )
 
 const (
-	// KernelAuto lets the node pick its kernel from the transport: xray for
-	// transports sing-box cannot handle (xhttp/splithttp), sing-box otherwise.
+	// KernelAuto lets the node pick its kernel: the panel's kernel_type when the
+	// panel sends one, otherwise the transport (xray for transports sing-box
+	// cannot handle, sing-box otherwise). See SelectKernel.
 	KernelAuto = "auto"
 	// KernelSingBox / KernelXray are the two concrete kernels.
 	KernelSingBox = "singbox"
 	KernelXray    = "xray"
+
+	// Who chose the concrete kernel (see SelectKernel).
+	KernelSourceLocal     = "local"     // kernel.type is singbox/xray in the node config
+	KernelSourcePanel     = "panel"     // kernel.type=auto, the panel sent kernel_type
+	KernelSourceTransport = "transport" // kernel.type=auto, no kernel_type from the panel
 )
+
+// SelectKernel picks the concrete kernel for a node.
+//
+//   - kernel.type singbox/xray in the local config always wins.
+//   - kernel.type auto follows the panel's kernel_type when the panel sends one.
+//     The panel generates kernel-specific config (routes, outbounds, DNS) for
+//     the kernel it names, so the node must run that kernel; there is no
+//     fallback — a panel kernel that cannot serve the transport is an error.
+//   - kernel.type auto with no kernel_type (upstream Xboard, older panels, or
+//     "auto") falls back to the transport rule, ResolveEffectiveKernel.
+//
+// The returned kernel is concrete; callers still run ValidateTransportKernel.
+func SelectKernel(configured, panelKernel, network string) (kernel, source string, err error) {
+	if strings.TrimSpace(configured) == "" {
+		configured = KernelAuto
+	}
+	local, err := normalizeKernelType(configured)
+	if err != nil {
+		return "", "", err
+	}
+	if local != KernelAuto {
+		return local, KernelSourceLocal, nil
+	}
+	if strings.TrimSpace(panelKernel) != "" {
+		pk, err := normalizeKernelType(panelKernel)
+		if err != nil {
+			return "", "", fmt.Errorf("panel kernel_type: %w", err)
+		}
+		if pk != KernelAuto {
+			return pk, KernelSourcePanel, nil
+		}
+	}
+	return ResolveEffectiveKernel(network, KernelAuto), KernelSourceTransport, nil
+}
 
 func ValidateNodeSpec(n *NodeSpec, kcfg config.KernelConfig) error {
 	if n == nil {
 		return nil
 	}
 
-	effectiveKernelType := strings.TrimSpace(kcfg.Type)
-	if effectiveKernelType == "" {
-		effectiveKernelType = strings.TrimSpace(n.KernelType)
-	}
-	kernelType, err := normalizeKernelType(effectiveKernelType)
+	// Validate against the kernel the node will actually run. An explicit or
+	// panel-chosen sing-box paired with an unsupported transport is rejected by
+	// ValidateTransportKernel below.
+	kernelType, _, err := SelectKernel(kcfg.Type, n.KernelType, n.Network)
 	if err != nil {
-		return fmt.Errorf("normalize kernel type: %w", err)
+		return fmt.Errorf("select kernel: %w", err)
 	}
-	// Resolve "auto" into a concrete kernel based on the transport. Explicit
-	// "singbox"/"xray" pass through unchanged — an explicit sing-box paired with
-	// an unsupported transport is then rejected by validateTransportKernel below.
-	kernelType = ResolveEffectiveKernel(n.Network, kernelType)
 
 	additionalOutboundSources, err := collectAdditionalOutboundTagSources(kcfg.CustomConfig, kcfg.CustomOutbound)
 	if err != nil {

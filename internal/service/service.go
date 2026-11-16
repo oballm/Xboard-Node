@@ -42,17 +42,19 @@ type Service struct {
 
 	// kernelMode is the configured policy ("auto"/"singbox"/"xray"); kernelType
 	// is the concrete kernel currently built into s.kernel. In "auto" mode the
-	// transport decides the concrete kernel, and ensureKernelType hot-swaps
-	// s.kernel when a config change crosses the kernel boundary.
-	kernelMode string
-	kernelType string
+	// panel's kernel_type (or, without one, the transport) decides the concrete
+	// kernel — see model.SelectKernel — and ensureKernelType hot-swaps s.kernel
+	// when a config change crosses the kernel boundary.
+	kernelMode   string
+	kernelType   string
+	kernelSource string // model.KernelSource*; "" until the first config
 	// kernelRunning mirrors s.kernel.IsRunning() for the metrics callback, which
 	// runs on the WS goroutine and must not touch s.kernel directly (s.kernel is
 	// reassigned by ensureKernelType on the Run goroutine).
 	kernelRunning atomic.Bool
-	// kernelTypeReported mirrors s.kernelType for the same off-loop readers:
-	// the concrete kernel this node runs, reported as metrics.kernel_type.
-	kernelTypeReported atomic.Value // string
+	// kernelReported mirrors s.kernelType/s.kernelSource for the same off-loop
+	// readers, reported as metrics.kernel_type / metrics.kernel_source.
+	kernelReported atomic.Value // kernelReport
 
 	lastConfig *model.NodeSpec
 	lastUsers  []model.UserSpec
@@ -155,8 +157,9 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	certMgr := cert.NewManager(cfg.Cert)
 
 	// kernelMode is the configured policy. The concrete initial kernel is
-	// sing-box for "auto" (the transport refines it once the first node config
-	// arrives, via ensureKernelType) and the explicit kernel otherwise.
+	// sing-box for "auto" (an unstarted placeholder: the first node config picks
+	// the real one via resolveKernelType/ensureKernelType) and the explicit
+	// kernel otherwise.
 	kernelMode := cfg.Kernel.Type
 	initialType := kernelMode
 	if initialType == model.KernelAuto || initialType == "" {
@@ -182,7 +185,7 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		wsStatusCh:   make(chan controlplane.StatusChange, 4),
 		pullResults:  make(chan pullResult, 1),
 	}
-	s.kernelTypeReported.Store(initialType)
+	s.kernelReported.Store(kernelReport{kernelType: initialType})
 	return s
 }
 
@@ -210,44 +213,74 @@ func (s *Service) syncKernelRunning() {
 	s.kernelRunning.Store(s.kernel != nil && s.kernel.IsRunning())
 }
 
-// ensureKernelType hot-swaps s.kernel to the requested concrete type when it
+// kernelChoice is a concrete kernel and who chose it (model.KernelSource*).
+type kernelChoice struct {
+	kernelType string
+	source     string
+}
+
+// kernelReport is what the metrics report about the kernel (see kernelReported).
+type kernelReport struct {
+	kernelType string
+	source     string
+}
+
+// ensureKernelType hot-swaps s.kernel to the chosen concrete type when it
 // differs from the currently built kernel. The freshly built kernel is left
 // stopped; the caller (startKernel / applyChanges) starts it. Must run on the
 // Run goroutine — s.kernel has no other writer, and its only off-loop reader
 // (wsMetrics) goes through s.kernelRunning instead.
-func (s *Service) ensureKernelType(want string) {
-	if want == "" || want == s.kernelType {
+func (s *Service) ensureKernelType(want kernelChoice) {
+	if want.kernelType == "" {
 		return
 	}
-	prev := s.kernelType
-	if s.kernel != nil {
-		s.kernel.Stop()
+	if want.kernelType == s.kernelType && want.source == s.kernelSource {
+		return
 	}
-	s.kernel = newKernelByType(s.cfg.Kernel, want)
-	s.kernelType = want
-	s.kernelTypeReported.Store(want)
-	// The freshly built kernel is stopped; the caller starts it.
-	s.syncKernelRunning()
-	// Re-attach the limiter hooks to the freshly built kernel.
-	s.kernel.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
-	s.kernel.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
-	nlog.Core().Info("kernel switched", "from", prev, "to", want)
+	prevType, prevSource := s.kernelType, s.kernelSource
+	s.kernelSource = want.source
+	if want.kernelType != s.kernelType {
+		if s.kernel != nil {
+			s.kernel.Stop()
+		}
+		s.kernel = newKernelByType(s.cfg.Kernel, want.kernelType)
+		s.kernelType = want.kernelType
+		// The freshly built kernel is stopped; the caller starts it.
+		s.syncKernelRunning()
+		// Re-attach the limiter hooks to the freshly built kernel.
+		s.kernel.SetSpeedLimitFunc(s.speedTracker.GetLimiter)
+		s.kernel.SetDeviceLimitFunc(s.limiter.GetDeviceLimitByUUID)
+	}
+	s.kernelReported.Store(kernelReport{kernelType: s.kernelType, source: s.kernelSource})
+	// One line whenever the choice changes, including the first config (where
+	// auto's sing-box placeholder may already be the right type, so no switch).
+	if prevSource == "" {
+		nlog.Core().Info("kernel selected", "kernel", want.kernelType, "source", want.source, "mode", s.kernelMode)
+	} else {
+		nlog.Core().Info("kernel selected", "kernel", want.kernelType, "source", want.source, "mode", s.kernelMode,
+			"previous", prevType, "previous_source", prevSource)
+	}
 }
 
-// resolveKernelType picks the concrete kernel for the spec's transport WITHOUT
-// switching. It returns an error only for an explicit kernel that cannot serve
-// the transport (e.g. kernel.type=singbox on an xhttp node) — "auto" always
-// resolves to a capable kernel. Callers validate the config against the returned
-// type's protocols and only then call ensureKernelType, so a config rejected by
-// static validation never tears down the running kernel. (A runtime *start*
-// failure after a type switch is a separate case with no rollback — break-before-
-// make, same as upstream; it self-heals on the next config event.)
-func (s *Service) resolveKernelType(spec *model.NodeSpec) (string, error) {
-	want := model.ResolveEffectiveKernel(spec.Network, s.kernelMode)
-	if err := model.ValidateTransportKernel(spec.Network, want); err != nil {
-		return "", err
+// resolveKernelType picks the concrete kernel for a config WITHOUT switching
+// (model.SelectKernel: local kernel.type, else the panel's kernel_type, else
+// the transport). It returns an error when the chosen kernel cannot serve the
+// transport (e.g. kernel.type=singbox, or panel kernel_type=singbox, on an
+// xhttp node) — there is no silent fallback to another kernel. Callers validate
+// the config against the returned type's protocols and only then call
+// ensureKernelType, so a config rejected by static validation never tears down
+// the running kernel. (A runtime *start* failure after a type switch is a
+// separate case with no rollback — break-before-make, same as upstream; it
+// self-heals on the next config event.)
+func (s *Service) resolveKernelType(spec *model.NodeSpec) (kernelChoice, error) {
+	kt, source, err := model.SelectKernel(s.kernelMode, spec.KernelType, spec.Network)
+	if err != nil {
+		return kernelChoice{}, err
 	}
-	return want, nil
+	if err := model.ValidateTransportKernel(spec.Network, kt); err != nil {
+		return kernelChoice{}, fmt.Errorf("%w (kernel chosen by %s)", err, source)
+	}
+	return kernelChoice{kernelType: kt, source: source}, nil
 }
 
 // protocolsForKernelType reports the protocols a concrete kernel supports
@@ -404,7 +437,7 @@ func (s *Service) initialSetup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if err := validateNodeRuntime(want, protocolsForKernelType(want), bootstrap.Config, s.cert.TLSCert()); err != nil {
+	if err := validateNodeRuntime(want.kernelType, protocolsForKernelType(want.kernelType), bootstrap.Config, s.cert.TLSCert()); err != nil {
 		return err
 	}
 	s.ensureKernelType(want)
@@ -668,7 +701,7 @@ func (s *Service) handleWSEvent(ctx context.Context, event controlplane.Event) {
 			nlog.Core().Warn("ws config kernel resolution failed, ignoring update", "error", err)
 			return
 		}
-		if err := validateNodeRuntime(want, protocolsForKernelType(want), event.Config, s.cert.TLSCert()); err != nil {
+		if err := validateNodeRuntime(want.kernelType, protocolsForKernelType(want.kernelType), event.Config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("ws config validation failed, ignoring update", "error", err)
 			return
 		}
@@ -774,7 +807,7 @@ func (s *Service) applyPullResult(ctx context.Context, result pullResult) {
 		if want, err := s.resolveKernelType(result.config); err != nil {
 			nlog.Core().Warn("runtime config kernel resolution failed", "error", err)
 			result.config = nil
-		} else if err := validateNodeRuntime(want, protocolsForKernelType(want), result.config, s.cert.TLSCert()); err != nil {
+		} else if err := validateNodeRuntime(want.kernelType, protocolsForKernelType(want.kernelType), result.config, s.cert.TLSCert()); err != nil {
 			nlog.Core().Warn("runtime config validation failed", "error", err)
 			result.config = nil
 		} else {
@@ -1328,11 +1361,15 @@ func (s *Service) pushReportSync() {
 func (s *Service) addVersionMetrics(m map[string]interface{}) {
 	m["node_version"] = buildinfo.Version
 	m["upgrade"] = selfupdate.CurrentStatus()
-	// The kernel actually built (singbox/xray), not the configured mode: with
-	// kernel.type=auto it follows the transport. Before the first config in
-	// auto mode it is the unstarted sing-box placeholder (kernel_status=false).
-	if kt, _ := s.kernelTypeReported.Load().(string); kt != "" {
-		m["kernel_type"] = kt
+	// The kernel actually built (singbox/xray), not the configured mode, and
+	// who chose it (local/panel/transport). Before the first config in auto
+	// mode it is the unstarted sing-box placeholder (kernel_status=false) with
+	// no source yet.
+	if kr, _ := s.kernelReported.Load().(kernelReport); kr.kernelType != "" {
+		m["kernel_type"] = kr.kernelType
+		if kr.source != "" {
+			m["kernel_source"] = kr.source
+		}
 	}
 }
 

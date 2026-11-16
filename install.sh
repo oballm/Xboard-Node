@@ -185,7 +185,8 @@ usage() {
 
   OPTIONAL:
     --node-type, -T     Explicit node type for node mode
-    --kernel, -k        singbox or xray (default: singbox)
+    --kernel, -k        singbox, xray or auto (default: singbox)
+                        auto: follow the panel's kernel_type per node, else the transport
     --version           Release version or latest (default: latest)
     --binary            Use a local xboard-node binary path instead of downloading
     --xbctl-binary      Use a local xbctl binary path instead of downloading
@@ -295,6 +296,7 @@ parse_args() {
     case "$KERNEL_TYPE" in
         singbox|SingBox|SINGBOX) KERNEL_TYPE="singbox" ;;
         xray|Xray|XRAY) KERNEL_TYPE="xray" ;;
+        auto|Auto|AUTO) KERNEL_TYPE="auto" ;;
         *) ;;
     esac
 
@@ -425,9 +427,9 @@ validate_install_request() {
         HEALTH_ENABLED=0
     fi
     case "$KERNEL_TYPE" in
-        singbox|xray) ;;
+        singbox|xray|auto) ;;
         *)
-            log_error "Kernel must be singbox or xray"
+            log_error "Kernel must be singbox, xray or auto"
             exit 1
             ;;
     esac
