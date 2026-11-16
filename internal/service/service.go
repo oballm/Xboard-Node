@@ -50,6 +50,9 @@ type Service struct {
 	// runs on the WS goroutine and must not touch s.kernel directly (s.kernel is
 	// reassigned by ensureKernelType on the Run goroutine).
 	kernelRunning atomic.Bool
+	// kernelTypeReported mirrors s.kernelType for the same off-loop readers:
+	// the concrete kernel this node runs, reported as metrics.kernel_type.
+	kernelTypeReported atomic.Value // string
 
 	lastConfig *model.NodeSpec
 	lastUsers  []model.UserSpec
@@ -164,7 +167,7 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 	l := limiter.New()
 	st := limiter.NewSpeedTracker(l)
 
-	return &Service{
+	s := &Service{
 		cfg:          cfg,
 		source:       cp,
 		sink:         cp,
@@ -179,6 +182,8 @@ func newService(cfg *config.Config, cp controlplane.ControlPlane) *Service {
 		wsStatusCh:   make(chan controlplane.StatusChange, 4),
 		pullResults:  make(chan pullResult, 1),
 	}
+	s.kernelTypeReported.Store(initialType)
+	return s
 }
 
 // newKernelByType builds a concrete kernel of the given type.
@@ -220,6 +225,7 @@ func (s *Service) ensureKernelType(want string) {
 	}
 	s.kernel = newKernelByType(s.cfg.Kernel, want)
 	s.kernelType = want
+	s.kernelTypeReported.Store(want)
 	// The freshly built kernel is stopped; the caller starts it.
 	s.syncKernelRunning()
 	// Re-attach the limiter hooks to the freshly built kernel.
@@ -1322,6 +1328,12 @@ func (s *Service) pushReportSync() {
 func (s *Service) addVersionMetrics(m map[string]interface{}) {
 	m["node_version"] = buildinfo.Version
 	m["upgrade"] = selfupdate.CurrentStatus()
+	// The kernel actually built (singbox/xray), not the configured mode: with
+	// kernel.type=auto it follows the transport. Before the first config in
+	// auto mode it is the unstarted sing-box placeholder (kernel_status=false).
+	if kt, _ := s.kernelTypeReported.Load().(string); kt != "" {
+		m["kernel_type"] = kt
+	}
 }
 
 // healthID names this node in the self-upgrade health check.
