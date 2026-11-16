@@ -127,7 +127,17 @@ type KernelConfig struct {
 	// For xray:     geoip.dat and geosite.dat.
 	// Defaults to config_dir when empty. You only need to set this if your
 	// geo database files live somewhere other than config_dir.
+	//
+	// xray reads geo files from ONE process-wide directory and caches them by
+	// file name, so all nodes of a process share the top-level geo dir: per-node
+	// or per-instance values that differ from it do not work for xray (a warning
+	// is logged). sing-box does not use geo files.
 	GeoDataDir string `yaml:"geo_data_dir"`
+
+	// GeoDataFallbackDirs are older geo locations (before all nodes shared one
+	// geo dir) whose files are copied over instead of downloading again. Set by
+	// config expansion, never from YAML.
+	GeoDataFallbackDirs []string `yaml:"-"`
 
 	// CustomOutbound adds outbound entries to the generated kernel config.
 	// Each item is a raw kernel-native outbound object (sing-box or xray format).
@@ -151,6 +161,12 @@ type CertConfig struct {
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
 	CertDir  string `yaml:"cert_dir"`
+	// BackupDir is where this node keeps its copy of a self-signed or panel-
+	// supplied cert (cert.pem/key.pem) for restarts. Defaults to CertDir. In
+	// nodes mode CertDir is shared by all nodes (one ACME store per domain), so
+	// each node gets its own BackupDir — otherwise nodes overwrite and then load
+	// each other's cert. Set by config expansion, never from YAML.
+	BackupDir string `yaml:"-"`
 	HTTPPort int    `yaml:"http_port"` // port for HTTP-01 challenge (default: 80)
 
 	// CertMode selects the TLS certificate strategy:
@@ -267,15 +283,34 @@ func (rc *RootConfig) setDefaultsFrom(baseDir string) {
 		rc.Config.setDefaultsFrom(baseDir)
 		return
 	}
+	// All instances share one geo dir: xray reads geo files from one
+	// process-wide directory, so per-instance dirs fight over it and download
+	// the same files once per instance. It is the top-level geo_data_dir if set
+	// (inheritFrom has already copied it into instances that left theirs empty),
+	// else the top-level config_dir, else the config file's directory.
+	sharedGeo := rc.Config.Kernel.GeoDataDir
+	if sharedGeo == "" {
+		sharedGeo = rc.Config.Kernel.ConfigDir
+	}
+	if sharedGeo == "" {
+		sharedGeo = baseDir
+	}
 	for i := range rc.Instances {
+		inst := &rc.Instances[i]
+		explicitGeo := inst.Kernel.GeoDataDir != ""
 		instBase := baseDir
 		// When multiple instances share the same base dir, derive a unique
 		// sub-directory per instance to avoid config_dir collisions.
 		// InstanceID is always populated by assignInstanceIDs() before this runs.
-		if len(rc.Instances) > 1 && rc.Instances[i].Kernel.ConfigDir == "" {
-			instBase = filepath.Join(baseDir, rc.Instances[i].InstanceID)
+		if len(rc.Instances) > 1 && inst.Kernel.ConfigDir == "" {
+			instBase = filepath.Join(baseDir, inst.InstanceID)
 		}
-		rc.Instances[i].setDefaultsFrom(instBase)
+		inst.setDefaultsFrom(instBase)
+		if !explicitGeo && inst.Kernel.GeoDataDir != sharedGeo {
+			// Older versions kept geo files in the instance's config_dir.
+			inst.Kernel.GeoDataFallbackDirs = []string{inst.Kernel.GeoDataDir}
+			inst.Kernel.GeoDataDir = sharedGeo
+		}
 	}
 }
 
@@ -762,9 +797,11 @@ func (c *Config) ExpandNodes() []*Config {
 		if entry.Kernel != nil && entry.Kernel.ConfigDir != "" {
 			nodeCfg.Kernel.ConfigDir = entry.Kernel.ConfigDir
 			if nodeCfg.Kernel.GeoDataDir == c.Kernel.ConfigDir {
-				// GeoDataDir was defaulted to ConfigDir — keep it pointing at
-				// the new ConfigDir unless the user set it explicitly.
-				nodeCfg.Kernel.GeoDataDir = entry.Kernel.ConfigDir
+				// GeoDataDir was defaulted to ConfigDir. It stays shared (xray
+				// has one geo dir per process); older versions moved it to the
+				// node's config_dir, so look there before downloading again.
+				nodeCfg.Kernel.GeoDataFallbackDirs = append(append([]string(nil),
+					c.Kernel.GeoDataFallbackDirs...), entry.Kernel.ConfigDir)
 			}
 		} else {
 			// Auto-derive a unique config_dir per node to avoid conflicts.
@@ -797,6 +834,10 @@ func (c *Config) ExpandNodes() []*Config {
 		if nodeCfg.Cert.CertDir == "" {
 			nodeCfg.Cert.CertDir = filepath.Join(nodeCfg.Kernel.ConfigDir, "certs")
 		}
+		// The cert dir may be shared by all nodes (the top-level cert), which
+		// suits the ACME store (one cert per domain) but not the per-node
+		// cert.pem/key.pem backup of a self-signed or panel-supplied cert.
+		nodeCfg.Cert.BackupDir = filepath.Join(nodeCfg.Kernel.ConfigDir, "certs")
 
 		result = append(result, &nodeCfg)
 	}
@@ -816,6 +857,7 @@ func (c *Config) ExpandMachineNode(nodeID int, nodeType string) *Config {
 		nodeCfg.Kernel.GeoDataDir = c.Kernel.GeoDataDir
 	}
 	nodeCfg.Cert.CertDir = filepath.Join(nodeCfg.Kernel.ConfigDir, "certs")
+	nodeCfg.Cert.BackupDir = nodeCfg.Cert.CertDir
 
 	return &nodeCfg
 }
@@ -872,11 +914,15 @@ func ValidateStartupLayout(instances []*Config) error {
 	healthPorts := make(map[int]string)
 	configDirs := make(map[string]string)
 	nodeBindings := make(map[string]string)
+	geoDirs := make(map[string]string) // geo dir -> first owner
 	for _, instance := range instances {
 		if instance == nil {
 			continue
 		}
 		owner := instance.InstanceID
+		if instance.IsMachineMode() {
+			noteGeoDir(geoDirs, instance.Kernel.GeoDataDir, owner)
+		}
 		if instance.HealthPort > 0 {
 			if other, ok := healthPorts[instance.HealthPort]; ok {
 				return fmt.Errorf("health_port %d is used by both %s and %s", instance.HealthPort, other, owner)
@@ -905,6 +951,7 @@ func ValidateStartupLayout(instances []*Config) error {
 				return fmt.Errorf("node binding %s is declared by both %s and %s", binding, other, owner)
 			}
 			nodeBindings[binding] = owner
+			noteGeoDir(geoDirs, node.Kernel.GeoDataDir, fmt.Sprintf("%s node %d", owner, node.Panel.NodeID))
 			if path := strings.TrimSpace(node.Kernel.CustomConfig); path != "" {
 				if _, err := os.Stat(path); err != nil {
 					return fmt.Errorf("kernel.custom_config %q for %s: %w", path, owner, err)
@@ -912,5 +959,28 @@ func ValidateStartupLayout(instances []*Config) error {
 			}
 		}
 	}
+	if len(geoDirs) > 1 {
+		dirs := make([]string, 0, len(geoDirs))
+		for d, who := range geoDirs {
+			dirs = append(dirs, d+" ("+who+")")
+		}
+		sort.Strings(dirs)
+		// Not an error: sing-box nodes do not use geo files, and the nodes may
+		// never run xray. But xray nodes in one process all read the same geo
+		// dir (XRAY_LOCATION_ASSET is process-wide), whichever was set last.
+		nlog.Core().Warn("geo_data_dir differs between nodes; xray uses one geo dir per process, so per-node values do not work for xray — set geo_data_dir only at the top level",
+			"geo_data_dirs", strings.Join(dirs, ", "))
+	}
 	return nil
+}
+
+func noteGeoDir(seen map[string]string, dir, owner string) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return
+	}
+	dir = filepath.Clean(dir)
+	if _, ok := seen[dir]; !ok {
+		seen[dir] = owner
+	}
 }

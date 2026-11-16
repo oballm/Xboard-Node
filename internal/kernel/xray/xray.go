@@ -5,12 +5,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	xgeodata "github.com/xtls/xray-core/common/geodata"
 	"github.com/xtls/xray-core/common/protocol"
 	"github.com/xtls/xray-core/common/uuid"
 	xrayCore "github.com/xtls/xray-core/core"
@@ -699,7 +701,7 @@ func (x *Xray) ensureGeoData(nc *model.NodeSpec) {
 		return
 	}
 	dir := x.cfg.GeoDataDir
-	if err := geodata.Ensure(dir, needIP, needSite, "xray"); err != nil {
+	if err := geodata.Ensure(dir, needIP, needSite, x.cfg.GeoDataFallbackDirs...); err != nil {
 		nlog.Core().Warn("geo database unavailable", "error", err)
 	}
 	os.Setenv("XRAY_LOCATION_ASSET", dir)
@@ -872,3 +874,16 @@ func (x *Xray) updateDispatcherLimits(users []model.UserSpec) {
 // so that concurrent Xray instances in multi-node mode each capture their
 // own LimitDispatcher.
 var xrayCreationMu sync.Mutex
+
+// reloadGeoData rebuilds every live xray geo matcher (routing, DNS) from the
+// geo files on disk, without restarting any kernel. xray's registries are
+// process-wide, so this covers all xray nodes of the process at once; on
+// error the matchers keep their previous data.
+func reloadGeoData() error {
+	return errors.Join(xgeodata.IPReg.Reload(), xgeodata.DomainReg.Reload())
+}
+
+func init() {
+	// The daily geo update applies new files to running xray nodes this way.
+	geodata.SetReloadHook(reloadGeoData)
+}

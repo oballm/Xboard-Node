@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -80,10 +81,19 @@ func (m *Manager) storePEM(cert, key []byte) {
 	m.persistPEM(cert, key)
 }
 
-// persistPEM writes cert/key to cert_dir for restart recovery.
+// backupDir is where this node keeps its cert.pem/key.pem backup: BackupDir
+// when config expansion set one (nodes and machine mode), else CertDir.
+func (m *Manager) backupDir() string {
+	if m.cfg.BackupDir != "" {
+		return m.cfg.BackupDir
+	}
+	return m.cfg.CertDir
+}
+
+// persistPEM writes cert/key to the backup dir for restart recovery.
 // Errors are logged but not returned — persistence is best-effort.
 func (m *Manager) persistPEM(cert, key []byte) {
-	dir := m.cfg.CertDir
+	dir := m.backupDir()
 	if dir == "" {
 		return
 	}
@@ -101,22 +111,64 @@ func (m *Manager) persistPEM(cert, key []byte) {
 	}
 }
 
-// atomicWriteFile writes data to a temp file and renames, preventing partial reads.
+// atomicWriteFile writes data to a uniquely named temp file and renames it,
+// so a reader never sees a partial file and two writers never mix bytes.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Chmod(tmp, perm); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
-// loadPersistedPEM loads previously persisted cert material from cert_dir.
+// loadPersistedPEM loads this node's backup cert. host, when not empty, must
+// be covered by the cert: a backup made for another domain (the panel changed
+// it, or it is another node's file) is not reused.
+//
+// Before per-node backup dirs, all nodes of a nodes-mode process wrote their
+// backup to the shared cert_dir. That legacy file is used only when host is
+// known and matches, and is then copied to this node's own backup dir.
 // Returns true if valid material was loaded.
-func (m *Manager) loadPersistedPEM() bool {
-	dir := m.cfg.CertDir
+func (m *Manager) loadPersistedPEM(host string) bool {
+	dir := m.backupDir()
 	if dir == "" {
 		return false
 	}
+	if m.loadPEMFrom(dir, host) {
+		return true
+	}
+	legacy := m.cfg.CertDir
+	if host == "" || legacy == "" || filepath.Clean(legacy) == filepath.Clean(dir) {
+		return false
+	}
+	if !m.loadPEMFrom(legacy, host) {
+		return false
+	}
+	if mat := m.mat.Load(); mat != nil {
+		m.persistPEM(mat.certPEM, mat.keyPEM)
+	}
+	return true
+}
+
+func (m *Manager) loadPEMFrom(dir, host string) bool {
 	certPEM, err := os.ReadFile(filepath.Join(dir, "cert.pem"))
 	if err != nil {
 		return false
@@ -126,13 +178,33 @@ func (m *Manager) loadPersistedPEM() bool {
 		return false
 	}
 	if err := validateKeyPair(certPEM, keyPEM); err != nil {
-		nlog.Core().Warn("cert: persisted cert invalid, will regenerate", "error", err)
+		nlog.Core().Warn("cert: persisted cert invalid, will regenerate", "dir", dir, "error", err)
 		return false
 	}
-	// Store in memory only (don't re-persist what we just read).
+	if host != "" {
+		if err := certCoversHost(certPEM, host); err != nil {
+			nlog.Core().Info("cert: persisted cert is for another domain, not reusing it", "dir", dir, "domain", host, "reason", err)
+			return false
+		}
+	}
+	// Store in memory only (the caller re-persists when it needs to).
 	m.mat.Store(&certMaterial{certPEM: certPEM, keyPEM: keyPEM})
 	nlog.Core().Info("cert: loaded persisted certificate from disk", "dir", dir)
 	return true
+}
+
+// certCoversHost reports whether the leaf cert in certPEM is valid for host
+// (DNS name, wildcard or IP).
+func certCoversHost(certPEM []byte, host string) error {
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		return errors.New("no PEM block")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return err
+	}
+	return leaf.VerifyHostname(host)
 }
 
 // Reconfigure applies a new cert configuration at runtime (e.g. from panel push).
@@ -140,6 +212,9 @@ func (m *Manager) loadPersistedPEM() bool {
 func (m *Manager) Reconfigure(ctx context.Context, newCfg config.CertConfig) (bool, error) {
 	if newCfg.CertDir == "" {
 		newCfg.CertDir = m.cfg.CertDir
+	}
+	if newCfg.BackupDir == "" {
+		newCfg.BackupDir = m.cfg.BackupDir
 	}
 
 	// If ACME is running and the new config materially differs (or switches
@@ -329,14 +404,14 @@ func (m *Manager) startFile() error {
 // ─── Mode: self ────────────────────────────────────────────────────────────
 
 func (m *Manager) startSelfSigned() error {
-	// Reuse persisted self-signed cert if available and valid.
-	if m.loadPersistedPEM() {
-		return nil
-	}
-
 	domain := m.cfg.Domain
 	if domain == "" {
 		domain = "localhost"
+	}
+
+	// Reuse the persisted self-signed cert if it is valid and for this domain.
+	if m.loadPersistedPEM(domain) {
+		return nil
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -388,7 +463,7 @@ func (m *Manager) startSelfSigned() error {
 func (m *Manager) startContent() error {
 	if m.cfg.CertContent == "" || m.cfg.KeyContent == "" {
 		// No fresh content from panel — try previously persisted material.
-		if m.loadPersistedPEM() {
+		if m.loadPersistedPEM(m.cfg.Domain) {
 			return nil
 		}
 		return fmt.Errorf("cert_mode 'content' requires both cert_content and key_content")

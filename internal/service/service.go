@@ -506,6 +506,7 @@ func (s *Service) applyNodeCert(ctx context.Context, newCfg *config.CertConfig) 
 	}
 	cfgCopy := *newCfg
 	cfgCopy.CertDir = s.cfg.Cert.CertDir
+	cfgCopy.BackupDir = s.cfg.Cert.BackupDir
 
 	changed, err := s.cert.Reconfigure(ctx, cfgCopy)
 	if err != nil {
