@@ -1423,18 +1423,7 @@ func runConfigInit(args []string) error {
 		instances = deduped
 	}
 
-	// Merge: replace if same ID exists, otherwise append.
-	replaced := false
-	for i, existing := range instances {
-		if existing.InstanceID == instanceID {
-			instances[i] = inst
-			replaced = true
-			break
-		}
-	}
-	if !replaced {
-		instances = append(instances, inst)
-	}
+	instances, inst = mergeInstance(instances, inst)
 	root.Instances = instances
 
 	// Write config.
@@ -1462,10 +1451,35 @@ func runConfigInit(args []string) error {
 		}
 	}
 
-	// Output for bash capture.
+	// Output for bash capture. install.sh health-checks HEALTH_PORT, which
+	// may differ from the requested port when another instance has it.
 	fmt.Printf("INSTANCE_ID=%s\n", instanceID)
 	fmt.Printf("ENV_KEY=%s\n", envKey)
+	fmt.Printf("HEALTH_PORT=%d\n", inst.HealthPort)
 	return nil
+}
+
+// mergeInstance replaces the instance with inst's ID, or appends inst, and
+// returns the list and inst as stored. inst gets a health port no other
+// instance uses: every install defaults to the same port, and a re-install
+// of a binding that was moved to the next port would otherwise move it back.
+func mergeInstance(instances []config.Config, inst config.Config) ([]config.Config, config.Config) {
+	at := -1
+	others := make([]config.Config, 0, len(instances))
+	for i, existing := range instances {
+		if at < 0 && existing.InstanceID == inst.InstanceID {
+			at = i
+			continue
+		}
+		others = append(others, existing)
+	}
+	inst.HealthPort = freeHealthPort(others, inst.HealthPort)
+	if at >= 0 {
+		instances[at] = inst
+	} else {
+		instances = append(instances, inst)
+	}
+	return instances, inst
 }
 
 // mergeCredentials reads existing key=value credentials, adds/replaces
@@ -1579,4 +1593,28 @@ func runConfigHealthPort(args []string) error {
 		fmt.Println(root.Config.HealthPort)
 	}
 	return nil
+}
+
+// freeHealthPort returns port, or the next port no other instance uses.
+// Every install defaults to the same health port, so adding a second binding
+// (e.g. a node on a machine that already runs machine mode) would otherwise
+// make the config invalid ("health_port is used by both") and the service
+// would not start. 0 (disabled) is returned as is.
+func freeHealthPort(instances []config.Config, port int) int {
+	if port <= 0 {
+		return port
+	}
+	used := make(map[int]bool, len(instances))
+	for _, inst := range instances {
+		if inst.HealthPort > 0 {
+			used[inst.HealthPort] = true
+		}
+	}
+	for used[port] {
+		port++
+		if port > 65535 {
+			return 0
+		}
+	}
+	return port
 }

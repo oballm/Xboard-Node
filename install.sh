@@ -378,10 +378,18 @@ run_with_retry() {
 }
 
 install_dependencies() {
+    # The installer needs only curl and CA certificates. Skip the package
+    # manager when both are there: on a freshly booted Ubuntu, unattended
+    # upgrades hold the dpkg lock for minutes, and installing nothing would
+    # still have to wait for it.
+    if command -v curl >/dev/null 2>&1 && [ -s /etc/ssl/certs/ca-certificates.crt ]; then
+        return
+    fi
     case "$OS" in
         ubuntu|debian)
+            log_step "Installing curl and ca-certificates"
             DEBIAN_FRONTEND=noninteractive run_with_retry 10 3 apt-get update -qq
-            DEBIAN_FRONTEND=noninteractive run_with_retry 10 3 apt-get install -y -qq curl wget ca-certificates >/dev/null 2>&1
+            DEBIAN_FRONTEND=noninteractive run_with_retry 10 3 apt-get install -y -qq curl ca-certificates >/dev/null 2>&1
             ;;
         centos|rhel|rocky|almalinux|fedora)
             if command -v dnf >/dev/null 2>&1; then
@@ -587,6 +595,18 @@ render_config() {
     }
 
     INSTANCE_ID=$(echo "$output" | grep '^INSTANCE_ID=' | cut -d= -f2-)
+    # A binding added next to another one gets the next free health port:
+    # check that one, not the other binding's.
+    local assigned_port
+    assigned_port=$(echo "$output" | grep '^HEALTH_PORT=' | cut -d= -f2-)
+    if [[ "$assigned_port" =~ ^[0-9]+$ ]]; then
+        HEALTH_PORT="$assigned_port"
+        if [ "$HEALTH_PORT" -eq 0 ]; then
+            HEALTH_ENABLED=0
+        else
+            HEALTH_ENABLED=1
+        fi
+    fi
     chmod 600 "$TMP_DIR/credentials.env"
 }
 
