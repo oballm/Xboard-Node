@@ -114,7 +114,7 @@ func (x *Xray) Protocols() []string {
 //	Phase 2 – Create:     xrayCore.New + capture LD (brief global lock)
 //	Phase 3 – StartNew:   instance.Start            (no lock, potentially slow)
 //	Phase 4 – Swap:       store new, extract old     (brief kernel lock)
-//	Phase 5 – RecycleOld: close old in background    (non-blocking)
+//	Phase 5 – RecycleOld: close old now, in background (see closeOld)
 func (x *Xray) Start(nodeConfig *model.NodeSpec, users []model.UserSpec, tls kernel.TLSCert) error {
 	// ── Phase 1: Build config (no shared state) ─────────────────────────
 	x.ensureGeoData(nodeConfig)
@@ -211,7 +211,9 @@ func (x *Xray) Stop() {
 	if ld != nil {
 		drainConns(ld, drainTimeout)
 	}
-	closeOld(inst, ld)
+	// Close before returning so the port is free for whatever starts next
+	// (sing-box, when the kernel is switched at runtime).
+	closeInstance(inst, ld)
 }
 
 func (x *Xray) IsRunning() bool { return x.running.Load() }
@@ -735,31 +737,33 @@ func startWithTimeout(inst *xrayCore.Instance, timeout time.Duration) error {
 	}
 }
 
-// closeOld shuts down a previously running instance and its dispatcher.
-// Recycling happens in a background goroutine to prevent the main thread
-// from blocking on slow connection draining, enabling "hitless" reload.
+// closeOld shuts down an instance that a restart replaced, right away and in
+// the background. Waiting for its connections to finish does not work: its
+// listeners share the port with the new instance (xray sets SO_REUSEPORT), so
+// while it lives it keeps getting a share of new connections — served with
+// the old routes and users, with traffic nobody counts — and an XHTTP session
+// can end up split across the two instances. Connections still on it are cut
+// and clients reconnect to the new instance.
 func closeOld(inst *xrayCore.Instance, ld *LimitDispatcher) {
 	if inst == nil {
 		return
 	}
-	go func() {
-		// 1. Drain connections gracefully (best effort, e.g. 5 minutes)
-		// We use a much longer timeout here than the default Stop() because
-		// it's running in background and doesn't block new user connections.
-		if ld != nil {
-			drainConns(ld, 5*time.Minute)
-		}
-		// 2. Hard close
-		inst.Close()
-		if ld != nil {
-			ld.ResetConns()
-		}
-		nlog.Core().Debug("xray: old instance recycled")
-	}()
+	go closeInstance(inst, ld)
+}
+
+func closeInstance(inst *xrayCore.Instance, ld *LimitDispatcher) {
+	if inst == nil {
+		return
+	}
+	inst.Close()
+	if ld != nil {
+		ld.ResetConns()
+	}
+	nlog.Core().Debug("xray: instance closed")
 }
 
 // drainConns waits up to timeout for the dispatcher's active connections to
-// reach zero. Used only during graceful Stop, not during hot-reload.
+// reach zero. Used only by Stop, not when a restart replaces the instance.
 func drainConns(ld *LimitDispatcher, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
