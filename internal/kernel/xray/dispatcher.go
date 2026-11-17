@@ -81,6 +81,54 @@ type LimitDispatcher struct {
 	unlimitedIPs sync.Map // email → *ipCounter
 
 	connCount atomic.Int64 // total active connections tracked by dispatcher
+
+	// userConns: each user's open inbound connections, so that removing a
+	// user (expired, over quota, disabled, UUID rotated) can close them.
+	// Removing the user from the inbound only stops new authentications.
+	userConnsMu sync.Mutex
+	userConns   map[string]map[uint64]net.Conn // email → id → inbound conn
+	userConnID  uint64
+}
+
+func (d *LimitDispatcher) addUserConn(email string, conn net.Conn) uint64 {
+	d.userConnsMu.Lock()
+	defer d.userConnsMu.Unlock()
+	if d.userConns == nil {
+		d.userConns = make(map[string]map[uint64]net.Conn)
+	}
+	m := d.userConns[email]
+	if m == nil {
+		m = make(map[uint64]net.Conn)
+		d.userConns[email] = m
+	}
+	d.userConnID++
+	m[d.userConnID] = conn
+	return d.userConnID
+}
+
+func (d *LimitDispatcher) removeUserConn(email string, id uint64) {
+	d.userConnsMu.Lock()
+	defer d.userConnsMu.Unlock()
+	if m := d.userConns[email]; m != nil {
+		delete(m, id)
+		if len(m) == 0 {
+			delete(d.userConns, email)
+		}
+	}
+}
+
+// CloseUserConns closes every open inbound connection of the user and
+// returns how many it closed. Mux sub-streams share one inbound connection,
+// so that connection may appear more than once; closing it twice is harmless.
+func (d *LimitDispatcher) CloseUserConns(email string) int {
+	d.userConnsMu.Lock()
+	m := d.userConns[email]
+	delete(d.userConns, email)
+	d.userConnsMu.Unlock()
+	for _, conn := range m {
+		conn.Close()
+	}
+	return len(m)
 }
 
 // ipCounter tracks IPs for unlimited users without any lock.
@@ -117,7 +165,7 @@ func (d *LimitDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*
 	}
 
 	if email != "" {
-		d.trackLink(link, email, sourceIP, isTCP)
+		d.trackLink(ctx, link, email, sourceIP, isTCP)
 	}
 	return link, nil
 }
@@ -129,7 +177,7 @@ func (d *LimitDispatcher) DispatchLink(ctx context.Context, dest net.Destination
 	}
 
 	if email != "" {
-		d.trackLink(link, email, sourceIP, isTCP)
+		d.trackLink(ctx, link, email, sourceIP, isTCP)
 	}
 	return d.innerDisp.DispatchLink(ctx, dest, link)
 }
@@ -156,12 +204,22 @@ func (d *LimitDispatcher) identifyAndCheck(ctx context.Context, dest net.Destina
 // trackLink records connection lifecycle without mutating xray-core owned
 // transport primitives. This keeps mux/XUDP compatible while still allowing
 // the dispatcher to release device-limit state when the link closes.
-func (d *LimitDispatcher) trackLink(link *transport.Link, email, sourceIP string, isTCP bool) {
+func (d *LimitDispatcher) trackLink(ctx context.Context, link *transport.Link, email, sourceIP string, isTCP bool) {
 	d.connCount.Add(1)
+
+	var connID uint64
+	var inboundConn net.Conn
+	if si := session.InboundFromContext(ctx); si != nil && si.Conn != nil {
+		inboundConn = si.Conn
+		connID = d.addUserConn(email, inboundConn)
+	}
 
 	onClose := func() {
 		if isTCP {
 			d.delConn(email, sourceIP)
+		}
+		if inboundConn != nil {
+			d.removeUserConn(email, connID)
 		}
 		d.connCount.Add(-1)
 	}

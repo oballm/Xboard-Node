@@ -375,8 +375,8 @@ func (x *Xray) AddUsers(users []model.UserSpec) (int, error) {
 	return added, nil
 }
 
-// RemoveUsers removes users from the running kernel via xray's UserManager API.
-// Truly hitless for supported protocols — remaining connections unaffected.
+// RemoveUsers removes users from the running kernel via xray's UserManager API
+// and closes their open connections. Other users' connections are unaffected.
 func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 	x.mu.Lock()
 	if x.instance == nil {
@@ -427,6 +427,7 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 			nlog.Core().Debug("xray: RemoveUser skipped", "user", u.ID, "error", err)
 			continue
 		}
+		x.closeUserConns(u.ID)
 		actualRemoved++
 	}
 
@@ -438,6 +439,22 @@ func (x *Xray) RemoveUsers(users []model.UserSpec) (int, error) {
 
 	nlog.Core().Info("xray: users removed via UserManager", "removed", actualRemoved, "total", len(kept))
 	return actualRemoved, nil
+}
+
+// closeUserConns cuts a removed user's open connections. Removing the user
+// from the inbound only stops new authentications; without this an expired
+// or over-quota user keeps a running download going, and its traffic is no
+// longer counted because the user is gone from x.users.
+func (x *Xray) closeUserConns(id int) {
+	x.mu.Lock()
+	ld := x.limitDispatcher
+	x.mu.Unlock()
+	if ld == nil {
+		return
+	}
+	if n := ld.CloseUserConns(userEmail(id)); n > 0 {
+		nlog.Core().Info("xray: closed removed user's connections", "user", id, "connections", n)
+	}
 }
 
 // UpdateUsers replaces the entire user set. If only speed/device limits
@@ -506,11 +523,14 @@ func (x *Xray) UpdateUsers(users []model.UserSpec) (added, removed int, err erro
 	}
 
 	// Remove first, then add (order matters for UUID changes on same ID).
+	// Close the removed users' open connections before the new UUID of a
+	// rotated user is added, so only connections on the old UUID are cut.
 	for _, u := range toRemove {
 		email := userEmail(u.ID)
 		if err := um.RemoveUser(ctx, email); err != nil {
 			nlog.Core().Debug("xray: RemoveUser skipped in UpdateUsers", "user", u.ID, "error", err)
 		}
+		x.closeUserConns(u.ID)
 	}
 	skipped := 0
 	for _, u := range toAdd {

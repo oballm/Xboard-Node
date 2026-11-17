@@ -1,11 +1,16 @@
 package xray
 
 import (
+	"context"
+	gonet "net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cedar2025/xboard-node/internal/model"
+	"github.com/xtls/xray-core/common"
 	"github.com/xtls/xray-core/common/buf"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/transport"
 )
 
@@ -185,7 +190,6 @@ func TestLimitDispatcher_UnlimitedUserFastPath(t *testing.T) {
 	}
 }
 
-
 func TestLimitDispatcher_TrackLinkPreservesReader(t *testing.T) {
 	ld := newTestDispatcher()
 	email := userEmail(1)
@@ -195,7 +199,7 @@ func TestLimitDispatcher_TrackLinkPreservesReader(t *testing.T) {
 	origWriter := &closeTrackingWriter{Writer: buf.Discard, onClose: func() {}}
 	link := &transport.Link{Reader: origReader, Writer: origWriter}
 
-	ld.trackLink(link, email, "1.1.1.1", true)
+	ld.trackLink(context.Background(), link, email, "1.1.1.1", true)
 
 	if link.Reader != origReader {
 		t.Fatal("trackLink must not replace link.Reader")
@@ -214,7 +218,7 @@ func TestLimitDispatcher_CloseTrackingWriterReleasesConn(t *testing.T) {
 	}
 
 	link := &transport.Link{Reader: nopReader{}, Writer: buf.Discard}
-	ld.trackLink(link, email, "1.1.1.1", true)
+	ld.trackLink(context.Background(), link, email, "1.1.1.1", true)
 
 	if got := ld.connCount.Load(); got != 1 {
 		t.Fatalf("expected connCount=1 after tracking, got %d", got)
@@ -231,5 +235,43 @@ func TestLimitDispatcher_CloseTrackingWriterReleasesConn(t *testing.T) {
 	}
 	if ld.checkDeviceLimit(email, "2.2.2.2", true) {
 		t.Fatal("device slot should be released after writer close")
+	}
+}
+
+// Removing a user must close the user's open inbound connections, and only
+// that user's; a link that ended on its own is forgotten.
+func TestCloseUserConnsClosesOnlyThatUser(t *testing.T) {
+	ld := newTestDispatcher()
+	open := func(email string) (gonet.Conn, *transport.Link) {
+		srv, cli := gonet.Pipe()
+		ctx := session.ContextWithInbound(context.Background(), &session.Inbound{Conn: srv})
+		link := &transport.Link{Reader: nopReader{}, Writer: buf.Discard}
+		ld.trackLink(ctx, link, email, "1.1.1.1", true)
+		return cli, link
+	}
+	closed := func(c gonet.Conn) bool {
+		c.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		_, err := c.Read(make([]byte, 1))
+		ne, ok := err.(gonet.Error)
+		return err != nil && !(ok && ne.Timeout())
+	}
+
+	a1, _ := open("user@1")
+	a2, _ := open("user@1")
+	b, _ := open("user@2")
+	_, ended := open("user@1")
+	common.Close(ended.Writer) // finished on its own
+
+	if n := ld.CloseUserConns("user@1"); n != 2 {
+		t.Fatalf("closed %d connections, want the 2 still open", n)
+	}
+	if !closed(a1) || !closed(a2) {
+		t.Fatal("user@1 connections not closed")
+	}
+	if closed(b) {
+		t.Fatal("user@2 connection was closed")
+	}
+	if n := ld.CloseUserConns("user@1"); n != 0 {
+		t.Fatalf("second close found %d connections", n)
 	}
 }
