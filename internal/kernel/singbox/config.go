@@ -294,67 +294,67 @@ func compilePanelRouteRule(pr model.RouteRule) []M {
 	return compiled
 }
 
+// compileCustomRouteRule turns one structured rule into ONE sing-box route
+// rule. sing-box already gives a single rule the intended meaning: the
+// destination address matchers (domain, domain_suffix, ip_cidr) are
+// alternatives, and each other group (port/port_range, network, source) must
+// also hold. Splitting the matchers into separate rules, as this used to do,
+// made every matcher an alternative: a rule for UDP on port 443 matched every
+// UDP flow and all of port 443. A rule with no condition compiles to nothing
+// rather than to a catch-all.
 func compileCustomRouteRule(rule model.CustomRouteRule) []M {
 	if rule.Disabled {
 		return nil
 	}
 
-	outbound := singboxOutboundForAction(rule.Action)
-	var compiled []M
-
-	if len(rule.Match.Domains) > 0 {
-		compiled = append(compiled, M{
-			"domain":   copyStrings(rule.Match.Domains),
-			"outbound": outbound,
-		})
+	entry := M{}
+	if v := trimmedNonEmpty(rule.Match.Domains); len(v) > 0 {
+		entry["domain"] = v
 	}
-	if len(rule.Match.DomainSuffixes) > 0 {
-		compiled = append(compiled, M{
-			"domain_suffix": copyStrings(rule.Match.DomainSuffixes),
-			"outbound":      outbound,
-		})
+	if v := trimmedNonEmpty(rule.Match.DomainSuffixes); len(v) > 0 {
+		entry["domain_suffix"] = v
 	}
-	if len(rule.Match.IPCIDRs) > 0 {
-		compiled = append(compiled, M{
-			"ip_cidr":  copyStrings(rule.Match.IPCIDRs),
-			"outbound": outbound,
-		})
+	if v := trimmedNonEmpty(rule.Match.IPCIDRs); len(v) > 0 {
+		entry["ip_cidr"] = v
 	}
-	if len(rule.Match.Ports) > 0 {
-		ports, portRanges := splitPorts(rule.Match.Ports)
-		entry := M{"outbound": outbound}
+	if ports, portRanges := splitPorts(rule.Match.Ports); len(ports) > 0 || len(portRanges) > 0 {
 		if len(ports) > 0 {
 			entry["port"] = ports
 		}
 		if len(portRanges) > 0 {
 			entry["port_range"] = portRanges
 		}
-		compiled = append(compiled, entry)
 	}
-	if len(rule.Match.Networks) > 0 {
-		compiled = append(compiled, M{
-			"network":  copyStrings(rule.Match.Networks),
-			"outbound": outbound,
-		})
+	if v := trimmedNonEmpty(rule.Match.Networks); len(v) > 0 {
+		entry["network"] = v
 	}
-	if len(rule.Match.SourceCIDRs) > 0 {
-		compiled = append(compiled, M{
-			"source_ip_cidr": copyStrings(rule.Match.SourceCIDRs),
-			"outbound":       outbound,
-		})
+	if v := trimmedNonEmpty(rule.Match.SourceCIDRs); len(v) > 0 {
+		entry["source_ip_cidr"] = v
 	}
-	if len(rule.Match.SourcePorts) > 0 {
-		ports, portRanges := splitPorts(rule.Match.SourcePorts)
-		entry := M{"outbound": outbound}
+	if ports, portRanges := splitPorts(rule.Match.SourcePorts); len(ports) > 0 || len(portRanges) > 0 {
 		if len(ports) > 0 {
 			entry["source_port"] = ports
 		}
 		if len(portRanges) > 0 {
 			entry["source_port_range"] = portRanges
 		}
-		compiled = append(compiled, entry)
 	}
-	return compiled
+	if len(entry) == 0 {
+		return nil
+	}
+	entry["outbound"] = singboxOutboundForAction(rule.Action)
+	return []M{entry}
+}
+
+// trimmedNonEmpty returns the trimmed non-empty values, or nil.
+func trimmedNonEmpty(values []string) []string {
+	var out []string
+	for _, v := range values {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func singboxOutboundForAction(action model.RouteAction) string {

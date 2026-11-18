@@ -701,29 +701,47 @@ func TestBuildRoutes_WithCustomRouteRules(t *testing.T) {
 	}
 	route := buildRoutes(nil, customRules, nil)
 	allRules := route["rules"].([]M)
-	if len(allRules) != 9 {
-		t.Fatalf("rules count: got %d, want 9", len(allRules))
+	// The structured rule stays ONE sing-box rule (address matchers OR'd,
+	// other groups AND'd by sing-box itself), plus the two defaults.
+	if len(allRules) != 3 {
+		t.Fatalf("rules count: got %d, want 3: %v", len(allRules), allRules)
 	}
-	if allRules[0]["domain"].([]string)[0] != "full.example.com" {
-		t.Fatalf("unexpected exact domain rule: %v", allRules[0])
+	want := M{
+		"domain":            []string{"full.example.com"},
+		"domain_suffix":     []string{"example.org"},
+		"ip_cidr":           []string{"1.1.1.0/24"},
+		"port":              []int{53},
+		"port_range":        []string{"1000:1002"},
+		"network":           []string{"tcp"},
+		"source_ip_cidr":    []string{"10.10.0.0/16"},
+		"source_port_range": []string{"2000:2001"},
+		"outbound":          "direct",
 	}
-	if allRules[1]["domain_suffix"].([]string)[0] != "example.org" {
-		t.Fatalf("unexpected domain suffix rule: %v", allRules[1])
+	if !reflect.DeepEqual(allRules[0], want) {
+		t.Fatalf("structured rule:\n got  %v\n want %v", allRules[0], want)
 	}
-	if allRules[2]["ip_cidr"].([]string)[0] != "1.1.1.0/24" {
-		t.Fatalf("unexpected ip cidr rule: %v", allRules[2])
+}
+
+func TestCompileCustomRouteRule_SingleRule(t *testing.T) {
+	block := model.RouteAction{Type: "block"}
+	cases := []struct {
+		name  string
+		match model.RouteMatch
+		want  []M
+	}{
+		{"udp 443 only", model.RouteMatch{Ports: []string{"443"}, Networks: []string{"udp"}},
+			[]M{{"port": []int{443}, "network": []string{"udp"}, "outbound": "block"}}},
+		{"suffix on a port", model.RouteMatch{DomainSuffixes: []string{"example.org"}, Ports: []string{"8443"}},
+			[]M{{"domain_suffix": []string{"example.org"}, "port": []int{8443}, "outbound": "block"}}},
+		{"blank values ignored", model.RouteMatch{Domains: []string{" ", ""}, Ports: []string{" 25 "}},
+			[]M{{"port": []int{25}, "outbound": "block"}}},
+		{"no condition is no rule", model.RouteMatch{Domains: []string{" "}}, nil},
 	}
-	if allRules[3]["port"].([]int)[0] != 53 {
-		t.Fatalf("unexpected port rule: %v", allRules[3])
-	}
-	if allRules[4]["network"].([]string)[0] != "tcp" {
-		t.Fatalf("unexpected network rule: %v", allRules[4])
-	}
-	if allRules[5]["source_ip_cidr"].([]string)[0] != "10.10.0.0/16" {
-		t.Fatalf("unexpected source cidr rule: %v", allRules[5])
-	}
-	if allRules[6]["source_port_range"].([]string)[0] != "2000:2001" {
-		t.Fatalf("unexpected source port rule: %v", allRules[6])
+	for _, c := range cases {
+		got := compileCustomRouteRule(model.CustomRouteRule{Match: c.match, Action: block})
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s:\n got  %v\n want %v", c.name, got, c.want)
+		}
 	}
 }
 

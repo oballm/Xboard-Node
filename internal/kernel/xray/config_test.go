@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"reflect"
 	"testing"
 
 	"github.com/cedar2025/xboard-node/internal/config"
@@ -332,8 +333,9 @@ func TestBuildRouting_WithCustomRouteRules(t *testing.T) {
 			Match: model.RouteMatch{
 				Domains:        []string{"full.example.com"},
 				DomainSuffixes: []string{"example.org"},
+				IPCIDRs:        []string{"1.2.3.0/24"},
 				Ports:          []string{"80", "443-445"},
-				Networks:       []string{"tcp", "udp"},
+				Networks:       []string{"tcp"},
 				SourceCIDRs:    []string{"192.168.1.0/24"},
 				SourcePorts:    []string{"1000-1002"},
 			},
@@ -343,26 +345,58 @@ func TestBuildRouting_WithCustomRouteRules(t *testing.T) {
 
 	routing := buildRouting(nil, customRules, nil)
 	xrayRules := routing["rules"].([]M)
-	if len(xrayRules) != 6 {
-		t.Fatalf("expected 6 rules, got %d", len(xrayRules))
+	// Domains and IPs are alternatives (two field rules); every other matcher
+	// rides along on both. Then the default private-IP block.
+	if len(xrayRules) != 3 {
+		t.Fatalf("expected 3 rules, got %d: %v", len(xrayRules), xrayRules)
 	}
-	if xrayRules[0]["outboundTag"] != "warp-jp" {
-		t.Fatalf("expected first custom outbound warp-jp, got %v", xrayRules[0]["outboundTag"])
+	for i, r := range xrayRules[:2] {
+		if r["outboundTag"] != "warp-jp" || r["port"] != "80,443-445" || r["network"] != "tcp" || r["sourcePort"] != "1000-1002" {
+			t.Fatalf("rule %d missing shared conditions: %v", i, r)
+		}
+		if got := r["source"].([]string); len(got) != 1 || got[0] != "192.168.1.0/24" {
+			t.Fatalf("rule %d unexpected source: %v", i, got)
+		}
 	}
 	if got := xrayRules[0]["domain"].([]string); len(got) != 2 || got[0] != "full.example.com" || got[1] != "domain:example.org" {
 		t.Fatalf("unexpected custom domains: %v", got)
 	}
-	if got := xrayRules[1]["port"]; got != "80,443-445" {
-		t.Fatalf("unexpected port matcher: %v", got)
+	if _, ok := xrayRules[0]["ip"]; ok {
+		t.Fatalf("domain rule must not also require ip: %v", xrayRules[0])
 	}
-	if got := xrayRules[2]["network"]; got != "tcp,udp" {
-		t.Fatalf("unexpected network matcher: %v", got)
+	if got := xrayRules[1]["ip"].([]string); len(got) != 1 || got[0] != "1.2.3.0/24" {
+		t.Fatalf("unexpected ip matcher: %v", got)
 	}
-	if got := xrayRules[3]["source"].([]string); len(got) != 1 || got[0] != "192.168.1.0/24" {
-		t.Fatalf("unexpected source cidr matcher: %v", got)
+	if _, ok := xrayRules[1]["domain"]; ok {
+		t.Fatalf("ip rule must not also require domain: %v", xrayRules[1])
 	}
-	if got := xrayRules[4]["sourcePort"]; got != "1000-1002" {
-		t.Fatalf("unexpected source port matcher: %v", got)
+}
+
+// A port or network given with an address matcher narrows that rule; it must
+// not become a rule of its own (a "UDP 443 only" rule used to block every UDP
+// flow and all of port 443).
+func TestCompileCustomRouteRule_ConditionsAreANDed(t *testing.T) {
+	block := model.RouteAction{Type: "block"}
+	cases := []struct {
+		name  string
+		match model.RouteMatch
+		want  []M
+	}{
+		{"udp 443 only", model.RouteMatch{Ports: []string{"443"}, Networks: []string{"udp"}},
+			[]M{{"type": "field", "outboundTag": "block", "port": "443", "network": "udp"}}},
+		{"suffix on a port", model.RouteMatch{DomainSuffixes: []string{"example.org"}, Ports: []string{"8443"}},
+			[]M{{"type": "field", "outboundTag": "block", "port": "8443", "domain": []string{"domain:example.org"}}}},
+		{"network alone", model.RouteMatch{Networks: []string{"udp"}},
+			[]M{{"type": "field", "outboundTag": "block", "network": "udp"}}},
+		{"blank values ignored", model.RouteMatch{Domains: []string{" ", ""}, Ports: []string{" 25 "}},
+			[]M{{"type": "field", "outboundTag": "block", "port": "25"}}},
+		{"no condition is no rule", model.RouteMatch{Domains: []string{" "}}, nil},
+	}
+	for _, c := range cases {
+		got := compileCustomRouteRule(model.CustomRouteRule{Match: c.match, Action: block})
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("%s:\n got  %v\n want %v", c.name, got, c.want)
+		}
 	}
 }
 

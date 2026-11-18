@@ -740,70 +740,73 @@ func compilePanelRouteRule(rule model.RouteRule) []M {
 	return compileCustomRouteRule(model.CustomRouteRule{Match: match, Action: action})
 }
 
+// compileCustomRouteRule turns one structured rule into xray field rules with
+// the same meaning as on sing-box: the address matchers (domains, domain
+// suffixes, IP CIDRs) are alternatives, and every other matcher (ports,
+// networks, source CIDRs, source ports) must also hold. An xray field rule ANDs
+// all its conditions, so a rule with both domains and IPs becomes two field
+// rules, each carrying the remaining conditions. A rule with no condition at
+// all compiles to nothing rather than to a catch-all.
 func compileCustomRouteRule(rule model.CustomRouteRule) []M {
-	outbound := xrayOutboundForAction(rule.Action)
-	var compiled []M
+	base := M{"type": "field", "outboundTag": xrayOutboundForAction(rule.Action)}
+	conditions := 0
+	if ports := nonEmpty(rule.Match.Ports); len(ports) > 0 {
+		base["port"] = strings.Join(ports, ",")
+		conditions++
+	}
+	if networks := nonEmpty(rule.Match.Networks); len(networks) > 0 {
+		base["network"] = strings.Join(networks, ",")
+		conditions++
+	}
+	if sources := nonEmpty(rule.Match.SourceCIDRs); len(sources) > 0 {
+		base["source"] = sources
+		conditions++
+	}
+	if sourcePorts := nonEmpty(rule.Match.SourcePorts); len(sourcePorts) > 0 {
+		base["sourcePort"] = strings.Join(sourcePorts, ",")
+		conditions++
+	}
 
-	if len(rule.Match.Domains) > 0 || len(rule.Match.DomainSuffixes) > 0 {
-		domains := make([]string, 0, len(rule.Match.Domains)+len(rule.Match.DomainSuffixes))
-		for _, value := range rule.Match.Domains {
-			value = strings.TrimSpace(value)
-			if value == "" {
-				continue
-			}
-			domains = append(domains, value)
-		}
-		for _, value := range rule.Match.DomainSuffixes {
-			value = strings.TrimSpace(value)
-			if value == "" {
-				continue
-			}
-			domains = append(domains, "domain:"+value)
-		}
-		if len(domains) > 0 {
-			compiled = append(compiled, M{
-				"type":        "field",
-				"domain":      domains,
-				"outboundTag": outbound,
-			})
-		}
+	domains := nonEmpty(rule.Match.Domains)
+	for _, suffix := range nonEmpty(rule.Match.DomainSuffixes) {
+		domains = append(domains, "domain:"+suffix)
 	}
-	if len(rule.Match.IPCIDRs) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"ip":          copyStrings(rule.Match.IPCIDRs),
-			"outboundTag": outbound,
-		})
+	ips := nonEmpty(rule.Match.IPCIDRs)
+
+	var compiled []M
+	if len(domains) > 0 {
+		r := cloneM(base)
+		r["domain"] = domains
+		compiled = append(compiled, r)
 	}
-	if len(rule.Match.Ports) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"port":        strings.Join(rule.Match.Ports, ","),
-			"outboundTag": outbound,
-		})
+	if len(ips) > 0 {
+		r := cloneM(base)
+		r["ip"] = ips
+		compiled = append(compiled, r)
 	}
-	if len(rule.Match.Networks) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"network":     strings.Join(rule.Match.Networks, ","),
-			"outboundTag": outbound,
-		})
-	}
-	if len(rule.Match.SourceCIDRs) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"source":      copyStrings(rule.Match.SourceCIDRs),
-			"outboundTag": outbound,
-		})
-	}
-	if len(rule.Match.SourcePorts) > 0 {
-		compiled = append(compiled, M{
-			"type":        "field",
-			"sourcePort":  strings.Join(rule.Match.SourcePorts, ","),
-			"outboundTag": outbound,
-		})
+	if len(compiled) == 0 && conditions > 0 {
+		compiled = append(compiled, base)
 	}
 	return compiled
+}
+
+// nonEmpty returns the trimmed non-empty values, or nil.
+func nonEmpty(values []string) []string {
+	var out []string
+	for _, v := range values {
+		if v = strings.TrimSpace(v); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func cloneM(m M) M {
+	out := make(M, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 func xrayOutboundForAction(action model.RouteAction) string {
@@ -818,15 +821,6 @@ func xrayOutboundForAction(action model.RouteAction) string {
 	default:
 		return "block"
 	}
-}
-
-func copyStrings(src []string) []string {
-	if len(src) == 0 {
-		return nil
-	}
-	out := make([]string, len(src))
-	copy(out, src)
-	return out
 }
 
 // sanitizeEmptyArrays recursively removes empty slices from a map.
