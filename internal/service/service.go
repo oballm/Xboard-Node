@@ -26,6 +26,7 @@ import (
 	"github.com/cedar2025/xboard-node/internal/model"
 	"github.com/cedar2025/xboard-node/internal/monitor"
 	"github.com/cedar2025/xboard-node/internal/nlog"
+	"github.com/cedar2025/xboard-node/internal/publicip"
 	"github.com/cedar2025/xboard-node/internal/selfupdate"
 	"github.com/cedar2025/xboard-node/internal/tracker"
 )
@@ -295,6 +296,8 @@ func (s *Service) Run(ctx context.Context) (err error) {
 	// A new version on trial is confirmed only once every reporting node has
 	// reported to the panel; a node that exits with an error fails the trial.
 	if s.sink.SupportsReporting() {
+		// One prober per process, shared by every node in it.
+		publicip.Start()
 		selfupdate.NodeStarted(s.healthID())
 		defer func() {
 			if err != nil && ctx.Err() == nil {
@@ -1362,6 +1365,15 @@ func (s *Service) pushReportSync() {
 func (s *Service) addVersionMetrics(m map[string]interface{}) {
 	m["node_version"] = buildinfo.Version
 	m["upgrade"] = selfupdate.CurrentStatus()
+	// The host's public addresses, probed by publicip; omitted until known.
+	if v4, v6 := publicip.Get(); v4 != "" || v6 != "" {
+		if v4 != "" {
+			m["public_ipv4"] = v4
+		}
+		if v6 != "" {
+			m["public_ipv6"] = v6
+		}
+	}
 	// The kernel actually built (singbox/xray), not the configured mode, and
 	// who chose it (local/panel/transport). Before the first config in auto
 	// mode it is the unstarted sing-box placeholder (kernel_status=false) with
