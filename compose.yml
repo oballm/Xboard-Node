@@ -2,10 +2,15 @@
 # Run all commands from this directory: cd compose && docker compose up -d
 # See README.md in this folder.
 
+# A fixed project name: compose otherwise names the project after this
+# directory, and an upstream xboard-node checkout gets the same name, so
+# `docker compose up` in one would replace the other's container.
+name: cp-node
+
 services:
-  xboard-node:
+  cp-node:
     image: ghcr.io/oballm/xboard-node:latest
-    container_name: xboard-node
+    container_name: cp-node
     network_mode: host
     restart: unless-stopped
     volumes:
@@ -14,7 +19,7 @@ services:
       - ./config:/etc/xboard-node
       # Versions installed by a panel-requested upgrade (XBOARD_NODE_UPDATE_DIR
       # in the image). Without a volume here, such upgrades are refused.
-      - xboard-node-update:/var/lib/xboard-node
+      - cp-node-update:/var/lib/xboard-node
     command: ["-c", "/etc/xboard-node/config.yml"]
     logging:
       driver: json-file
@@ -29,4 +34,4 @@ services:
     #   KERNEL_TYPE: singbox
 
 volumes:
-  xboard-node-update: {}
+  cp-node-update: {}
